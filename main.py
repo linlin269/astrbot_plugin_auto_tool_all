@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,27 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 from .avatar_service import AvatarError, AvatarService
+from .context_clear import (
+    ContextClearError,
+    ContextClearService,
+    format_duration,
+    parse_duration,
+    session_label,
+)
 from .event_images import extract_image_sources
 from .tool_bridge import ToolBridge, ToolBridgeError
 
 PLUGIN_NAME = "astrbot_plugin_auto_tool_all"
 _INTERNAL_TOOL_NAMES = ToolBridge.INTERNAL_TOOLS
+
+_CLEAR_USAGE = (
+    "清空上下文指令用法：\n"
+    "/清空上文 —— 立即清空当前会话上下文\n"
+    "/清空上文 all —— 立即清空所有会话上下文\n"
+    "/清空上文 6s|6秒|5min|5分钟|1h|1小时 —— 定时清空当前会话上下文\n"
+    "/查看清空上文定时任务 —— 查看当前定时任务\n"
+    "/取消清空上文定时任务 序号|qq号|群号|all —— 取消定时任务"
+)
 
 
 class AutoToolAll(Star):
@@ -30,6 +47,7 @@ class AutoToolAll(Star):
         self._data_dir = self._resolve_data_dir()
         self.avatar_service = AvatarService(self._data_dir, self.config, logger)
         self.tool_bridge = ToolBridge(context, self.config, logger)
+        self.context_clear = ContextClearService(context, logger)
 
     async def initialize(self) -> None:
         """Log the currently visible tools without taking ownership of them."""
@@ -47,7 +65,126 @@ class AutoToolAll(Star):
             )
 
     async def terminate(self) -> None:
-        """No background task or external connection is retained by this plugin."""
+        """Cancel scheduled clears; no other background task is retained."""
+        self.context_clear.shutdown()
+
+    @filter.on_astrbot_loaded()
+    async def notify_restart(self) -> None:
+        """Report restart to admins; scheduled clears do not survive restarts."""
+        try:
+            notified = await self.context_clear.notify_restart_to_admins()
+            if notified:
+                logger.info(
+                    "%s restart notification delivered to %d admin(s).",
+                    PLUGIN_NAME,
+                    notified,
+                )
+        except ContextClearError as exc:
+            logger.warning("%s restart notification failed: %s", PLUGIN_NAME, exc)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("%s restart notification failed: %s", PLUGIN_NAME, exc)
+
+    # ------------------------------------------------------------------
+    # Context clearing commands (admin only, silent for members)
+    # ------------------------------------------------------------------
+
+    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @filter.command("清空上文", alias={"清空对话"}, priority=2)
+    async def clear_context_command(
+        self, event: AstrMessageEvent, action: str = ""
+    ) -> AsyncGenerator[Any, None]:
+        """清空 LLM 对话上下文；支持 all 与定时（6s/6秒/5min/5分钟/1h/1小时）。"""
+        argument = (action or "").strip()
+        umo = event.unified_msg_origin
+
+        try:
+            if not argument:
+                await self.context_clear.clear_session(umo)
+                yield event.plain_result("已清空当前会话上下文。")
+                return
+            if argument.lower() == "all":
+                count = await self.context_clear.clear_all_sessions()
+                yield event.plain_result(f"已清空 {count} 个会话的上下文。")
+                return
+            duration = parse_duration(argument)
+            if duration is None:
+                yield event.plain_result(_CLEAR_USAGE)
+                return
+            replaced = self.context_clear.schedule_clear(umo, duration)
+            prefix = "已覆盖原定时，" if replaced else ""
+            yield event.plain_result(
+                f"{prefix}将在 {format_duration(duration)} 后清空当前会话上下文。"
+            )
+        except ContextClearError as exc:
+            yield event.plain_result(f"清空上下文失败：{exc}")
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.exception("clear_context_command failed")
+            yield event.plain_result(f"清空上下文时发生异常：{exc}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @filter.command("查看清空上文定时任务", priority=2)
+    async def list_scheduled_clears_command(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[Any, None]:
+        """列出当前所有上下文定时清空任务，按触发时间排序。"""
+        entries = self.context_clear.sorted_entries()
+        if not entries:
+            yield event.plain_result("当前没有上下文定时清空任务。")
+            return
+        now = datetime.now()
+        lines = ["当前定时清空任务："]
+        for index, entry in enumerate(entries, 1):
+            remaining = format_duration(entry.fire_at - now)
+            lines.append(
+                f"{index}. {session_label(entry.umo)} — "
+                f"{entry.fire_at.strftime('%H:%M:%S')}（还有 {remaining}）"
+            )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @filter.command("取消清空上文定时任务", priority=2)
+    async def cancel_scheduled_clears_command(
+        self, event: AstrMessageEvent, action: str = ""
+    ) -> AsyncGenerator[Any, None]:
+        """取消定时清空任务；参数为序号、qq号/群号或 all。"""
+        argument = (action or "").strip()
+        if not argument:
+            yield event.plain_result(
+                "用法：/取消清空上文定时任务 序号|qq号|群号|all\n"
+                "序号以 /查看清空上文定时任务 的列表为准。"
+            )
+            return
+
+        if argument.lower() == "all":
+            removed = self.context_clear.cancel_all()
+            if not removed:
+                yield event.plain_result("当前没有可取消的定时任务。")
+                return
+            yield event.plain_result(self._format_cancelled(removed))
+            return
+
+        removed: list[Any] = []
+        if argument.isdigit() and 1 <= int(argument) <= len(
+            self.context_clear.sorted_entries()
+        ):
+            # Small numbers that exist in the listed indexes are treated as
+            # indexes first; qq/group numbers never collide in practice.
+            entry = self.context_clear.cancel_by_index(int(argument))
+            removed = [entry] if entry else []
+        else:
+            removed = self.context_clear.cancel_for_session_id(argument)
+
+        if removed:
+            yield event.plain_result(self._format_cancelled(removed))
+            return
+        yield event.plain_result(
+            "没有匹配的定时任务。用 /查看清空上文定时任务 查看当前序号和会话。"
+        )
+
+    @staticmethod
+    def _format_cancelled(removed: list[Any]) -> str:
+        labels = "、".join(session_label(entry.umo) for entry in removed)
+        return f"已取消 {len(removed)} 个定时任务：{labels}。"
 
     @filter.llm_tool(name="list_available_tools")
     async def list_available_tools(self, event: AstrMessageEvent) -> str:

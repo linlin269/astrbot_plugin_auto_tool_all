@@ -4,7 +4,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
 from astrbot_plugin_auto_tool_all.tool_bridge import ToolBridge, ToolBridgeError
 
 

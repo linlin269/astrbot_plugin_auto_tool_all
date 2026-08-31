@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import dataclass
 
 import pytest
-
 from astrbot_plugin_auto_tool_all.avatar_service import AvatarError, AvatarService
 
 

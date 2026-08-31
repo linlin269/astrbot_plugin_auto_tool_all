@@ -15,8 +15,22 @@ def _install_astrbot_import_stubs():
     star = ModuleType("astrbot.api.star")
 
     class Filter:
+        PermissionType = SimpleNamespace(ADMIN="admin", MEMBER="member")
+
         @staticmethod
         def llm_tool(name=None):
+            return lambda function: function
+
+        @staticmethod
+        def command(name=None, alias=None, priority=0):
+            return lambda function: function
+
+        @staticmethod
+        def permission_type(permission_type, raise_error=False):
+            return lambda function: function
+
+        @staticmethod
+        def on_astrbot_loaded(**kwargs):
             return lambda function: function
 
     class Star:

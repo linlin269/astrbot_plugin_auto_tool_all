@@ -241,7 +241,7 @@ class AvatarService:
                 paths.append(
                     await self.get_or_download(url, namespace="reference", key=digest)
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._log("warning", "external reference download failed: %s", exc)
             if len(paths) >= limit:
                 break

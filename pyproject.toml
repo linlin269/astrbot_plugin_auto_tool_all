@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+ignore = [
+  # Scheduled clears intentionally use naive local wall-clock time, matching
+  # how users read the "触发时间" shown by the list command.
+  "DTZ005",
+  # Background tasks (scheduled clear loop, restart notification retries)
+  # deliberately catch broad exceptions so one failure cannot kill the task.
+  "BLE001",
+]
