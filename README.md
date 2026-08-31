@@ -1,0 +1,101 @@
+# astrbot_plugin_auto_tool_all
+
+让 AstrBot 通过自然语言编排全局 LLM 工具，并在 aiocqhttp / OneBot v11 上把 QQ 头像作为生图参考图。
+
+## 能力
+
+- `list_available_tools`：列出当前 active 的外部 LLM 工具。
+- `call_plugin_tool`：通过工具名和 JSON 参数调用其它 `llm_tool`、`FunctionTool` 或 MCP 工具。
+- `avatar_draw`：获取机器人、发送者或被 @ 用户的 QQ 头像，合并当前消息图、回复引用图和外部图片 URL，调用生图工具。
+- 工具列表在每次调用时动态读取，因此未来新安装并注册为 LLM 工具的插件无需修改本插件即可被发现。
+
+## 安装
+
+### 方式一：AstrBot WebUI 从 GitHub 仓库安装（推荐）
+
+1. 把本仓库推送到 GitHub，**仓库名必须为 `astrbot_plugin_auto_tool_all`**（AstrBot 用仓库 URL 里的仓库名作为插件目录名，仅把 `-` 转为 `_` 并小写）。
+2. 发布前把 `metadata.yaml` 中的 `repo` 字段改成你的实际仓库地址——WebUI 的"检查插件更新"依赖该字段。
+3. 在 AstrBot WebUI「插件管理 → 从仓库安装」填入仓库地址，例如：
+   `https://github.com/<你的用户名>/astrbot_plugin_auto_tool_all`
+   支持 GitHub 仓库主页链接、`.git` 结尾链接、SSH 形式；默认分支由 GitHub 自动解析。
+4. 安装器会校验根目录 `metadata.yaml`（必需字段：`name`、`desc`、`version`、`author`）、克隆源码（不保留 `.git`）、加载时自动按 `requirements.txt` 恢复依赖。本仓库满足全部要求。
+5. 更新插件时递增 `metadata.yaml` 的 `version` 并推送，WebUI 即可检测到新版本；建议同时打 `v0.1.0` 形式的 tag。
+
+### 方式二：手动复制
+
+将整个目录复制到实际 AstrBot 运行根目录：
+
+```text
+<AstrBotRoot>/data/plugins/astrbot_plugin_auto_tool_all/
+```
+
+当前工作区不包含 AstrBot 本体，`C:\astrbot` 不是自动推断出的运行根目录。请以 AstrBot 启动目录或 `ASTRBOT_ROOT` 为准。
+
+安装依赖并在 WebUI 重载插件：
+
+```text
+pip install -r requirements.txt
+```
+
+头像功能要求真实的 aiocqhttp / OneBot v11 事件。WebChat 可以用来检查工具是否注册，但没有 QQ `self_id` 时不能取得真实 QQ 头像。
+
+## 与 selfie_image 配合
+
+默认生图工具名为 `generate_image`，兼容 `astrbot_plugin_selfie_image` 1.4.x 的 LLM 工具。
+
+请在 selfie_image 的 Web 管理面板中开启 `image_enable_llm_tool`。本插件不调用 selfie_image 的 `/画` 或 `/看看你` 指令，而是调用其 `generate_image` 工具，因此不会与现有 command 冲突。
+
+selfie_image 会从当前事件读取消息图片、引用图片、@头像和本地参考图。本插件把机器人 QQ 头像下载到插件数据目录后，以本地 `Image` 组件临时注入事件，避免被 selfie_image 的“过滤机器人 qlogo URL”逻辑排除。
+
+## 自然语言示例
+
+在开启 AstrBot 对话/Agent 且 @机器人或使用唤醒词后，可以说：
+
+- `看看你`
+- `画一张你的头像变成赛博朋克角色`
+- `看看我`
+- `@某人 看看他`
+- 直接发送一张图并说：`把图里的人物换成你`
+- 回复一条带图消息并说：`把图里的人物换成你`
+- `先搜一张雨夜街道的图，再把图里的人换成你`
+
+对于最后一种链路，LLM 可以先调用 anysearch，再把搜索结果中的图片 URL 放入 `avatar_draw.reference_image_urls`。
+
+## 其它插件和未来插件
+
+本插件不会复制 anysearch 或 BitTorrent 的业务逻辑，也不会接管它们的 command：
+
+- anysearch 的 `anysearch_batch_search` 等工具可以通过 `call_plugin_tool` 调用。
+- BitTorrent 的 `search_magnet`、`preview_magnet` 可以通过 `call_plugin_tool` 调用。
+- 以后新增的插件只要使用 `@filter.llm_tool`、`context.add_llm_tools()` 或 AstrBot 支持的 MCP 工具注册能力，就会进入全局工具列表。
+
+只有 `/指令` 而没有 LLM 工具注册的插件，不属于第一版通用桥接范围。
+
+## 配置
+
+主要配置项：
+
+- `image_tool_name`：默认 `generate_image`。
+- `image_tool_candidates`：首选工具不可用时的回退列表。
+- `allowed_tool_names` / `blocked_tool_names`：限制万能工具入口可调用的工具。
+- `avatar_spec`、`avatar_cache_ttl_minutes`：QQ头像规格和缓存时间。
+- `max_reference_images`、`external_image_max_mb`：参考图数量和下载大小上限。
+- `tool_call_timeout_seconds`、`tool_loop_max_steps`：目标工具执行限制。
+
+## 安全边界
+
+- 外部图片只允许 http/https，并拒绝 localhost、内网 IP、回环地址和链路本地地址。
+- 工具桥不会调用本插件自身的工具，防止递归。
+- 停用工具、黑名单工具和 schema 不允许的参数会被拒绝或过滤。
+- 图片缓存存放于 `data/plugin_data/astrbot_plugin_auto_tool_all/`，不会写入插件目录。
+- 目标环境仍应通过 AstrBot 的工具权限配置限制高风险工具；本插件不会绕过工具权限。
+
+## 测试
+
+当前工作区没有 AstrBot 本体，集成测试需要在实际 AstrBot 源码/运行环境执行。静态测试可运行：
+
+```text
+python -m compileall astrbot_plugin_auto_tool_all
+pytest -q astrbot_plugin_auto_tool_all/tests
+ruff check astrbot_plugin_auto_tool_all
+```
