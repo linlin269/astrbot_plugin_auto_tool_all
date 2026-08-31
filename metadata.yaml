@@ -8,7 +8,7 @@ desc: >-
 version: v0.1.0
 author: AstrBot Community
 # 发布前必改：换成你的实际仓库地址，WebUI 检查插件更新依赖这个字段。
-repo: https://github.com/YourName/astrbot_plugin_auto_tool_all
+repo: https://github.com/linlin269/astrbot_plugin_auto_tool_all
 astrbot_version: ">=4.13.0,<5"
 support_platforms:
   - aiocqhttp
