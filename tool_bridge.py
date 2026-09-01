@@ -160,6 +160,28 @@ class ToolBridge:
         max_steps: int | None = None,
         timeout: int | None = None,
     ) -> str:
+        text, _ = await self.invoke_result(
+            event,
+            tool_name,
+            arguments,
+            prompt_prefix=prompt_prefix,
+            max_steps=max_steps,
+            timeout=timeout,
+        )
+        return text
+
+    async def invoke_result(
+        self,
+        event: Any,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        prompt_prefix: str = "",
+        max_steps: int | None = None,
+        timeout: int | None = None,
+    ) -> tuple[str, Any]:
+        """Run the tool and return (text, raw response) so callers can recover
+        media components the text summary would otherwise drop."""
         tool = self.get_target_tool(tool_name)
         safe_args = self.validate_arguments(tool, arguments)
         tool_set = self._single_tool_set(tool)
@@ -198,6 +220,8 @@ class ToolBridge:
             f"请只调用一次工具 `{tool_name}`，不要调用任何其它工具。"
             f"调用参数必须严格使用以下 JSON：{args_json}。"
             "工具执行完成后，用一句话说明执行结果；不要臆造工具没有返回的内容。"
+            "如果工具返回中包含图片或视频链接（http/https 直链），"
+            "必须原样完整保留这些链接，不要省略或改写。"
         )
         loop = getattr(self.context, "tool_loop_agent", None)
         if not callable(loop):
@@ -210,7 +234,7 @@ class ToolBridge:
             max_steps=steps,
             tool_call_timeout=call_timeout,
         )
-        return self.response_text(response) or f"工具 `{tool_name}` 已执行。"
+        return self.response_text(response) or f"工具 `{tool_name}` 已执行。", response
 
     @staticmethod
     def _single_tool_set(tool: Any) -> Any:
@@ -252,3 +276,25 @@ class ToolBridge:
         if not isinstance(value, dict):
             raise ToolBridgeError("arguments 必须解析为 JSON 对象。")
         return value
+
+    @staticmethod
+    def extract_media_urls(response: Any) -> list[str]:
+        """Recover http(s) media URLs carried by result-chain components."""
+        urls: list[str] = []
+        chain = getattr(response, "result_chain", None) or getattr(
+            response, "chain", None
+        )
+        items: list[Any] = []
+        inner = getattr(chain, "chain", None)
+        if isinstance(inner, list):
+            items = inner
+        elif isinstance(chain, (list, tuple)):
+            items = list(chain)
+        for item in items:
+            if type(item).__name__ not in ("Image", "Video"):
+                continue
+            for attr in ("url", "file"):
+                value = str(getattr(item, attr, "") or "").strip()
+                if value.startswith(("http://", "https://")) and value not in urls:
+                    urls.append(value)
+        return urls

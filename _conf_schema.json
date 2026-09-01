@@ -66,6 +66,54 @@
     "type": "bool",
     "default": true
   },
+  "deliver_media_base64": {
+    "description": "媒体以 base64 发送",
+    "type": "bool",
+    "default": true,
+    "hint": "工具返回中的图片/视频由插件下载后以 base64 消息发出（失败自动回退发 URL）；临时文件发送后立即清理。"
+  },
+  "media_image_max_mb": {
+    "description": "base64 图片大小上限（MB）",
+    "type": "int",
+    "default": 10,
+    "hint": "超过上限的图片回退为发送 URL。"
+  },
+  "media_video_max_mb": {
+    "description": "base64 视频大小上限（MB）",
+    "type": "int",
+    "default": 100,
+    "hint": "超过上限的视频回退为发送 URL。"
+  },
+  "media_max_count": {
+    "description": "单次最多发送媒体数",
+    "type": "int",
+    "default": 5,
+    "hint": "一次工具调用结果中最多转发的图片/视频数量，防止刷屏。"
+  },
+  "probe_enabled": {
+    "description": "启用模型查看/测速触发",
+    "type": "bool",
+    "default": true,
+    "hint": "监听“看看里面有什么模型/帮我测试一下里面的模型”类话语并自动调用 OpenAI 兼容接口。"
+  },
+  "probe_concurrency": {
+    "description": "模型测速并发数",
+    "type": "int",
+    "default": 3,
+    "hint": "同时对多少个模型发送测试消息（1-10）。"
+  },
+  "probe_timeout_seconds": {
+    "description": "单模型测速超时（秒）",
+    "type": "int",
+    "default": 10,
+    "hint": "每个模型测试请求的超时时间，超时/报错/空回复都视为不可用。"
+  },
+  "probe_memory_ttl_minutes": {
+    "description": "url/key 记忆时长（分钟）",
+    "type": "int",
+    "default": 30,
+    "hint": "分开多条消息发送 url 和 key 时的配对记忆时长；仅存内存，重启即失，成功使用后 key 立即丢弃。"
+  },
   "debug_logging": {
     "description": "启用调试日志",
     "type": "bool",

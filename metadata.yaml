@@ -1,13 +1,16 @@
 name: astrbot_plugin_auto_tool_all
 display_name: Auto Tool All
-short_desc: 用自然语言编排 AstrBot 全局工具，支持 QQ 头像参考生图与上下文清理。
+short_desc: 用自然语言编排 AstrBot 全局工具，支持媒体转发、接口测速、QQ 头像生图与上下文清理。
 desc: >-
   通过自然语言调用 AstrBot 中已注册的 LLM 工具，支持未来插件动态加入；
+  工具返回中的图片/视频自动下载并以 base64 消息转发（带大小上限与回退）；
+  支持对 OpenAI 兼容接口（如中转站）的“查看模型列表”与“逐模型测速”
+  （说一句“帮我测试一下里面的模型”即可，url/key 支持分条发送与内存记忆）；
   在 aiocqhttp/OneBot v11 上可获取机器人、发送者和被@用户的 QQ 头像，
   并把消息图、引用图及搜索结果图片接力给生图工具；
   提供管理员专属的会话上下文清理指令（立即 / 定时 / 全部会话），
   重启后自动向管理员私聊汇报。
-version: v0.2.1
+version: v0.2.2
 author: AstrBot Community
 # 发布前必改：换成你的实际仓库地址，WebUI 检查插件更新依赖这个字段。
 repo: https://github.com/linlin269/astrbot_plugin_auto_tool_all
@@ -19,5 +22,7 @@ tags:
   - llm-tool
   - tool-orchestration
   - image
+  - video
   - avatar
+  - api-probe
   - session-management

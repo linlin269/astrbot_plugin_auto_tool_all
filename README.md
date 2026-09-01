@@ -1,14 +1,51 @@
 # astrbot_plugin_auto_tool_all
 
-让 AstrBot 通过自然语言编排全局 LLM 工具，并在 aiocqhttp / OneBot v11 上把 QQ 头像作为生图参考图；同时提供管理员专属的会话上下文清理指令。
+让 AstrBot 通过自然语言编排全局 LLM 工具；把工具返回的图片/视频以 base64 消息转发；对 OpenAI 兼容接口做"查看模型 + 逐模型测速"；在 aiocqhttp / OneBot v11 上把 QQ 头像作为生图参考图；同时提供管理员专属的会话上下文清理指令。
 
 ## 能力
 
 - `list_available_tools`：列出当前 active 的外部 LLM 工具。
-- `call_plugin_tool`：通过工具名和 JSON 参数调用其它 `llm_tool`、`FunctionTool` 或 MCP 工具。
+- `call_plugin_tool`：通过工具名和 JSON 参数调用其它 `llm_tool`、`FunctionTool` 或 MCP 工具；返回中的图片/视频自动下载后以 base64 消息转发。
+- `probe`（事件监听）：对 OpenAI 兼容接口"看看里面有什么模型 / 帮我测试一下里面的模型"，逐模型测出首字时间与总回复时间并汇总。
 - `avatar_draw`：获取机器人、发送者或被 @ 用户的 QQ 头像，合并当前消息图、回复引用图和外部图片 URL，调用生图工具。
 - 工具列表在每次调用时动态读取，因此未来新安装并注册为 LLM 工具的插件无需修改本插件即可被发现。
 - 上下文清理指令（见下节）：立即 / 定时 / 一键清空所有会话的 LLM 对话数据。
+
+## 媒体 base64 转发
+
+搜索等工具返回的图片/视频链接，QQ 客户端直接拉 URL 经常失败（防盗链、内网、被墙图床）。本插件把这类媒体**下载后转 base64** 再发：
+
+- 图片上限 10MB（`media_image_max_mb`）、视频上限 100MB（`media_video_max_mb`）；超限、下载失败或发送失败自动**回退为发 URL**。
+- 单次最多转发 5 个（`media_max_count`）；总开关 `deliver_media_base64`。
+- 临时文件**发送后立即删除**，服务器不留媒体文件（启动时还会清扫异常残留）。
+- 只转发 http/https 的公开地址（内网/回环地址按 SSRF 防护拒绝）。
+
+## 模型查看与测速（OpenAI 兼容接口）
+
+在消息里带上 **url 和 key**，再说触发语即可，四种给法都支持：
+
+| 给法 | 示例 |
+|---|---|
+| 写在同一句 | `https://api.xx.com/v1 key是sk-xxx 帮我看看里面有什么模型` |
+| 回复引用 | 回复那条含 url 和 key 的消息，说"帮我测试一下里面的模型" |
+| 上一条同发 | 先发一条含 url+key 的消息，下一句说"帮我测试一下里面的模型" |
+| 分条发送 | 一条只发 url，一条只发 key，再说"看看里面有什么模型"（顺序不限） |
+
+- **查看模型**：调 `{url}/models` 返回模型列表。
+- **测试模型**：对每个模型用流式 `hi` 测一次，记录**首字时间**与**回复总时间**；3 并发、单模型 10 秒超时；只有收到真实回复的才算可用。≥6 个模型时先回"开始测试，共 N 个模型"，测完主动推送汇总：
+  ```text
+  可用模型有：
+  ✓ gpt-4o-mini - 首字 0.8s - 总回复 2.3s
+  ✓ deepseek-v3 - 首字 1.2s - 总回复 4.5s
+
+  不可用 1 个：
+  ✗ some-model - 不可用（超时（10s））
+  ```
+  结果按总回复时间从快到慢排序；端点不支持流式时自动改非流式重试并注明（首字=总时间）。
+- **URL 前缀兼容**：url 以 `/v1` 结尾直接用；不以版本段结尾默认补 `/v1`；说"**用 v3/api 查看里面的模型**"可显式指定前缀（`{url}/v3/api/models`）。
+- **key 安全**：只存内存、不落盘、不写日志；分条发送的 url/key 会话内记忆 30 分钟（`probe_memory_ttl_minutes`），一次成功使用后 key 立即丢弃。
+- 提醒：测试会真实消耗该 key 的 token（每模型一次对话，`max_tokens=32`）。
+
 
 ## 清空上下文（仅管理员，普通用户完全静默）
 
@@ -112,6 +149,8 @@ selfie_image 的 `generate_image` 内部会把带“自拍/合影/同框/和我/
 - `avatar_spec`、`avatar_cache_ttl_minutes`：QQ头像规格和缓存时间。
 - `max_reference_images`、`external_image_max_mb`：参考图数量和下载大小上限。
 - `tool_call_timeout_seconds`、`tool_loop_max_steps`：目标工具执行限制。
+- `deliver_media_base64`、`media_image_max_mb`、`media_video_max_mb`、`media_max_count`：媒体 base64 转发开关、图片/视频大小上限与单次数量上限。
+- `probe_enabled`、`probe_concurrency`、`probe_timeout_seconds`、`probe_memory_ttl_minutes`：模型查看/测速的开关、并发数、单模型超时与 url/key 记忆时长。
 
 ## 安全边界
 

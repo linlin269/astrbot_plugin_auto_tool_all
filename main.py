@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -22,10 +23,27 @@ from .context_clear import (
     session_label,
 )
 from .event_images import extract_image_sources
+from .media_delivery import MediaDeliveryService, extract_media_urls_from_text
+from .openai_probe import (
+    OpenAIProbeService,
+    ProbeError,
+    detect_probe_mode,
+    extract_api_key,
+    extract_explicit_prefix,
+    first_api_url,
+)
 from .tool_bridge import ToolBridge, ToolBridgeError
 
 PLUGIN_NAME = "astrbot_plugin_auto_tool_all"
 _INTERNAL_TOOL_NAMES = ToolBridge.INTERNAL_TOOLS
+
+# 模型测速：达到该数量才先发“开始测试”预告，小列表直接等结果。
+_TEST_ACK_THRESHOLD = 6
+_PROBE_GUIDANCE = (
+    "请先把 API 地址（url）和 key 发给我——可以分开几条消息发，也可以写在一起，"
+    "我会记住（内存缓存，不落盘）。然后再说一次"
+    "“看看里面有什么模型”或“帮我测试一下里面的模型”。"
+)
 
 _CLEAR_USAGE = (
     "清空上下文指令用法：\n"
@@ -82,6 +100,22 @@ _LOOKALIKE_REWRITES_EN: tuple[tuple[str, str], ...] = (
 )
 
 
+def _chunk_lines(lines: list[str], limit: int = 1800) -> list[str]:
+    """把多行文本按 QQ 消息长度上限切成若干条，避免超长发送失败。"""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in lines:
+        if current and size + len(line) + 1 > limit:
+            chunks.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
 class AutoToolAll(Star):
     """Natural-language access to AstrBot tools plus QQ-avatar image orchestration."""
 
@@ -94,6 +128,11 @@ class AutoToolAll(Star):
         self.avatar_service = AvatarService(self._data_dir, self.config, logger)
         self.tool_bridge = ToolBridge(context, self.config, logger)
         self.context_clear = ContextClearService(context, logger)
+        self.media_delivery = MediaDeliveryService(self._data_dir, self.config, logger)
+        self.probe = OpenAIProbeService(self.config, logger)
+        # 模型探测的 url/key 会话内记忆：{umo: {field: (value, timestamp)}}。
+        # 只存内存、带 TTL；key 在一次成功使用后立即丢弃。
+        self._probe_memory: dict[str, dict[str, tuple[str, float]]] = {}
 
     async def initialize(self) -> None:
         """Log the currently visible tools without taking ownership of them."""
@@ -113,6 +152,7 @@ class AutoToolAll(Star):
     async def terminate(self) -> None:
         """Cancel scheduled clears; no other background task is retained."""
         self.context_clear.shutdown()
+        self._probe_memory.clear()
 
     @filter.on_astrbot_loaded()
     async def notify_restart(self) -> None:
@@ -279,7 +319,7 @@ class AutoToolAll(Star):
         """
         try:
             parsed = self.tool_bridge.parse_json_arguments(arguments)
-            result = await self.tool_bridge.invoke(
+            result_text, response = await self.tool_bridge.invoke_result(
                 event,
                 tool_name,
                 parsed,
@@ -288,7 +328,6 @@ class AutoToolAll(Star):
                     "不要改调用目标，也不要把工具返回内容编造成不存在的事实。"
                 ),
             )
-            return result
         except ToolBridgeError as exc:
             return f"无法调用工具 `{tool_name}`：{exc}"
         except (
@@ -299,6 +338,216 @@ class AutoToolAll(Star):
         ) as exc:  # pragma: no cover - adapter/provider-specific
             logger.exception("call_plugin_tool failed for %s", tool_name)
             return f"调用工具 `{tool_name}` 时发生异常：{exc}"
+
+        media_note = await self._deliver_tool_media(event, response, result_text)
+        if media_note:
+            return f"{result_text}\n\n{media_note}"
+        return result_text
+
+    async def _deliver_tool_media(
+        self, event: AstrMessageEvent, response: Any, result_text: str
+    ) -> str:
+        """把工具结果里的媒体 URL 下载后以 base64 图片/视频消息发出。
+
+        媒体来源有两处：内层响应消息链中的 Image/Video 组件，
+        以及工具文本结果里的媒体直链。发送后临时文件立即清理。
+        """
+        if not self.media_delivery.enabled():
+            return ""
+        urls = self.tool_bridge.extract_media_urls(response)
+        for url in extract_media_urls_from_text(result_text):
+            if url not in urls:
+                urls.append(url)
+        if not urls:
+            return ""
+        try:
+            report = await self.media_delivery.deliver(event, urls)
+        except Exception:
+            logger.exception("media delivery failed")
+            return ""
+        if report.sent_images or report.sent_videos or report.fallback_urls:
+            return report.summary()
+        return ""
+
+    # ------------------------------------------------------------------
+    # OpenAI 兼容接口：模型查看与测速（自然语言 + url/key 记忆触发）
+    # ------------------------------------------------------------------
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def openai_probe_listener(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[Any, None]:
+        """监听“看看里面有什么模型 / 帮我测试一下里面的模型”类话语。
+
+        url 和 key 支持四种给法：写在同一句、回复引用、上一条消息、
+        分多条消息先后发送（内存记忆 30 分钟）。命中即拦截事件，
+        直接调 HTTP 接口，测试结果按总回复时间升序汇总推送。
+        """
+        try:
+            prepared = self._prepare_probe(event)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            logger.exception("openai probe preparation failed")
+            return
+        if prepared is None:
+            return
+
+        mode, url, key, prefix, missing = prepared
+        event.stop_event()
+        if missing:
+            yield event.plain_result(missing)
+            return
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        try:
+            models = await self.probe.list_models(url, key, prefix)
+        except ProbeError as exc:
+            yield event.plain_result(f"获取模型列表失败：{exc}")
+            return
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.exception("openai probe list_models failed")
+            yield event.plain_result(f"获取模型列表时发生异常：{exc}")
+            return
+
+        if mode == "list":
+            lines = [f"该接口共有 {len(models)} 个模型："]
+            lines.extend(f"{i}. {name}" for i, name in enumerate(models, 1))
+            for chunk in _chunk_lines(lines):
+                yield event.plain_result(chunk)
+            self._forget_probe_key(umo)
+            return
+
+        concurrency = self.probe.concurrency()
+        timeout = self.probe.timeout_seconds()
+        if len(models) >= _TEST_ACK_THRESHOLD:
+            yield event.plain_result(
+                f"开始测试，共 {len(models)} 个模型"
+                f"（{concurrency} 个并发，每个 {timeout} 秒超时），测完自动汇报。"
+            )
+        try:
+            probe_result = await self.probe.probe_models(
+                url, key, models, api_prefix=prefix
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.exception("openai probe_models failed")
+            yield event.plain_result(f"测试过程发生异常：{exc}")
+            return
+        for chunk in _chunk_lines(probe_result.summary().splitlines()):
+            yield event.plain_result(chunk)
+        self._forget_probe_key(umo)
+
+    def _prepare_probe(
+        self, event: AstrMessageEvent
+    ) -> tuple[str, str, str, str, str] | None:
+        """解析触发语并配对 url/key；返回 (mode, url, key, prefix, missing)。"""
+        text = str(getattr(event, "message_str", "") or "").strip()
+        quoted = self._quoted_text(event)
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+
+        mode = detect_probe_mode(text)
+        if not mode:
+            self._harvest_probe_inputs(umo, quoted, text)
+            return None
+        if not self._as_bool("probe_enabled", True):
+            return None
+
+        url = (
+            first_api_url(text)
+            or first_api_url(quoted)
+            or self._probe_memory_value(umo, "url")
+        )
+        key = (
+            extract_api_key(text)
+            or extract_api_key(quoted)
+            or self._probe_memory_value(umo, "key")
+        )
+        prefix = extract_explicit_prefix(text) or self._probe_memory_value(
+            umo, "prefix"
+        )
+        self._harvest_probe_inputs(umo, quoted, text)
+
+        if url and key:
+            return mode, url, key, prefix, ""
+        # 提到“里面/全部/所有”说明用户明确指向之前发过的服务，给引导而不是沉默。
+        if re.search(r"里面|全部|所有", text):
+            return mode, "", "", "", _PROBE_GUIDANCE
+        return None
+
+    def _harvest_probe_inputs(self, umo: str, *sources: str) -> None:
+        """把消息里的 url/key/前缀记入内存；TTL 过期即丢，绝不写日志。"""
+        if not umo:
+            return
+        now = time.time()
+        ttl = self._probe_ttl_seconds()
+        entry = self._probe_memory.setdefault(umo, {})
+        for field_name in list(entry.keys()):
+            _, stamp = entry[field_name]
+            if now - stamp > ttl:
+                entry.pop(field_name, None)
+        for source in sources:
+            url = first_api_url(source)
+            if url:
+                entry["url"] = (url, now)
+                prefix = extract_explicit_prefix(source)
+                if prefix:
+                    entry["prefix"] = (prefix, now)
+            key = extract_api_key(source)
+            if key:
+                entry["key"] = (key, now)
+        if not entry:
+            self._probe_memory.pop(umo, None)
+
+    def _probe_memory_value(self, umo: str, field_name: str) -> str:
+        entry = self._probe_memory.get(umo)
+        if not entry:
+            return ""
+        item = entry.get(field_name)
+        if not item:
+            return ""
+        value, stamp = item
+        if time.time() - stamp > self._probe_ttl_seconds():
+            entry.pop(field_name, None)
+            if not entry:
+                self._probe_memory.pop(umo, None)
+            return ""
+        return value
+
+    def _forget_probe_key(self, umo: str) -> None:
+        """用完即弃：一次成功的列表/测试之后立刻丢弃 key。"""
+        entry = self._probe_memory.get(umo)
+        if not entry:
+            return
+        entry.pop("key", None)
+        if not entry:
+            self._probe_memory.pop(umo, None)
+
+    def _probe_ttl_seconds(self) -> int:
+        try:
+            minutes = int(self.config.get("probe_memory_ttl_minutes", 30))
+        except (TypeError, ValueError):
+            minutes = 30
+        return max(1, min(minutes, 1440)) * 60
+
+    @staticmethod
+    def _quoted_text(event: AstrMessageEvent) -> str:
+        """取出回复/引用消息的纯文本，供 url/key 配对。"""
+        message_obj = getattr(event, "message_obj", None)
+        components = getattr(message_obj, "message", None)
+        if not isinstance(components, list):
+            return ""
+        parts: list[str] = []
+        for component in components:
+            if type(component).__name__ != "Reply":
+                continue
+            text = str(getattr(component, "message_str", "") or "").strip()
+            if text:
+                parts.append(text)
+            chain = getattr(component, "chain", None)
+            if isinstance(chain, list):
+                for item in chain:
+                    piece = getattr(item, "text", None)
+                    if isinstance(piece, str) and piece.strip():
+                        parts.append(piece.strip())
+        return "\n".join(parts)
 
     @filter.llm_tool(name="avatar_draw")
     async def avatar_draw(
