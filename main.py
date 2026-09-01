@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from collections.abc import AsyncGenerator, Iterator
@@ -36,6 +37,19 @@ from .tool_bridge import ToolBridge, ToolBridgeError
 
 PLUGIN_NAME = "astrbot_plugin_auto_tool_all"
 _INTERNAL_TOOL_NAMES = ToolBridge.INTERNAL_TOOLS
+
+# 钩子层自动转发跳过名单：内部工具自带交付/桥接逻辑，生图工具自行发送图片，
+# 重复转发会造成同一张图双发。
+_AUTO_DELIVER_SKIP_TOOLS = frozenset(
+    {
+        "list_available_tools",
+        "call_plugin_tool",
+        "fetch_media",
+        "avatar_draw",
+        "generate_image",
+        "generate_selfie",
+    }
+)
 
 # 模型测速：达到该数量才先发“开始测试”预告，小列表直接等结果。
 _TEST_ACK_THRESHOLD = 6
@@ -311,8 +325,12 @@ class AutoToolAll(Star):
         """调用当前 AstrBot 已注册的任意外部 LLM 工具。
 
         适用于用户明确要求调用某个插件工具、搜索工具、资源工具或未来新安装插件的工具。
-        优先直接调用工具；只有需要显式指定工具名，或主模型无法直接选择时才使用本入口。
+        搜索/信息查询类工具若已注册为全局工具，可直接调用，无需经过本入口；
+        只有需要显式指定工具名，或主模型无法直接选择时才使用本入口。
         本工具不能调用自身的内部工具，也不能调用只有 /指令 而未注册为 LLM 工具的插件。
+        重要：当用户意图是“下载图片/视频发给我”时，无论通过哪条途径搜索，
+        拿到候选链接后必须调用 fetch_media 完成下载与发送；
+        链接里提取不到媒体时如实告知用户，不要改用生图工具冒充下载结果。
         Args:
             tool_name(string): 要调用的外部工具名称，例如 anysearch_batch_search、search_magnet、preview_magnet 或未来插件注册的工具名。
             arguments(string): JSON 对象形式的工具参数，例如 {"queries":"[\\"AstrBot\\"]"}。
@@ -344,6 +362,136 @@ class AutoToolAll(Star):
             return f"{result_text}\n\n{media_note}"
         return result_text
 
+    @filter.llm_tool(name="fetch_media")
+    async def fetch_media(self, event: AstrMessageEvent, urls: list[str]) -> str:
+        """把图片/视频直链或含媒体的网页链接下载后，以 base64 图片/视频消息发给用户。
+
+        当用户要求“下载后发给我”“把这张图/视频发给我”“把搜到的图发我”，
+        或需要把搜索结果、前文提到的链接变成真正的媒体消息时调用。
+        urls 可填图片/视频直链（如 https://.../xxx.jpg），也可填 B 站视频页等
+        网页链接（自动提取页面中的封面图与插图）。
+        一次最多发送 media_max_count 个媒体；临时文件发送后立即删除。
+
+        行为约定：如果所有链接都提取不到可下载的媒体，就如实告诉用户
+        “没找到可直接下载的图片/视频”，并把原始链接发给用户自行查看；
+        禁止改用 generate_image 等生图工具，把生成的图冒充下载的图。
+        生图工具只用于用户明确要求“画一张/生成一张”的场景。
+        Args:
+            urls(array[string]): 图片/视频直链或含媒体的网页链接列表，例如 ["https://www.bilibili.com/video/BV1H8411r735/"]。
+        """
+        if not self._as_bool("fetch_media_enabled", True):
+            return "管理员已关闭媒体下载功能（fetch_media_enabled）。"
+        normalized = self._normalize_urls(urls)
+        if not normalized:
+            return "没有收到任何链接。请把图片/视频直链或网页链接放进 urls 参数。"
+        try:
+            return await self.media_delivery.fetch_media_result(
+                event,
+                normalized,
+                page_extract=self._as_bool("fetch_media_page_extract", True),
+            )
+        except Exception:  # pragma: no cover - network/platform specific
+            logger.exception("fetch_media failed")
+            return "下载媒体时发生异常，请稍后再试，或把原始链接直接发给用户查看。"
+
+    @filter.on_llm_tool_respond()
+    async def auto_deliver_tool_media(
+        self,
+        event: AstrMessageEvent,
+        tool: Any = None,
+        tool_args: dict | None = None,
+        tool_result: Any = None,
+    ) -> None:
+        """主 Agent 直接调用任意工具返回后，把结果中的媒体转成 base64 发出。
+
+        覆盖模型绕过 call_plugin_tool 直接调用 anysearch 等全局工具的路径。
+        call_plugin_tool / fetch_media 自带交付，生图工具自行发图，均跳过；
+        内层 tool_loop_agent 默认不挂本钩子，因此不会与 call_plugin_tool 重复。
+        钩子内异常由 AstrBot 捕获记录，不影响消息主流程。
+        """
+        if not self._as_bool("auto_deliver_tool_media", True):
+            return
+        if not self.media_delivery.enabled():
+            return
+        try:
+            tool_name = str(getattr(tool, "name", "") or "")
+            if tool_name in _AUTO_DELIVER_SKIP_TOOLS:
+                return
+            urls = self._extract_hook_media_urls(tool_result)
+            if not urls:
+                return
+            fresh = self._filter_fresh_urls(event, urls)
+            if not fresh:
+                return
+            report = await self.media_delivery.deliver(event, fresh)
+            self._mark_delivered_urls(event, fresh)
+        except Exception:  # pragma: no cover - defensive hook boundary
+            logger.exception("auto media delivery failed")
+            return
+        if report.sent_images or report.sent_videos:
+            logger.info(
+                "%s auto-delivered %d image(s) and %d video(s) from tool `%s`.",
+                PLUGIN_NAME,
+                report.sent_images,
+                report.sent_videos,
+                tool_name or "unknown",
+            )
+
+    @staticmethod
+    def _extract_hook_media_urls(tool_result: Any) -> list[str]:
+        """Pull media URLs from a hook's tool_result across result shapes.
+
+        AstrBot v4.x wraps local tool text in CallToolResult(content=[TextContent]);
+        older or third-party payloads may pass the raw string directly.
+        """
+        urls: list[str] = []
+        if tool_result is None:
+            return urls
+        if isinstance(tool_result, str):
+            return extract_media_urls_from_text(tool_result)
+        content = getattr(tool_result, "content", None)
+        if isinstance(content, list):
+            for item in content:
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    for url in extract_media_urls_from_text(text):
+                        if url not in urls:
+                            urls.append(url)
+            return urls
+        for attr in ("text", "completion_text", "result"):
+            value = getattr(tool_result, attr, None)
+            if isinstance(value, str):
+                for url in extract_media_urls_from_text(value):
+                    if url not in urls:
+                        urls.append(url)
+                break
+        return urls
+
+    @staticmethod
+    def _delivered_url_store(event: AstrMessageEvent) -> set[str]:
+        """Per-event set of media URLs already handled this conversation round."""
+        store = getattr(event, "_auto_tool_all_delivered_urls", None)
+        if not isinstance(store, set):
+            store = set()
+            # Read-only event objects reject attribute writes; dedupe then
+            # degrades to best effort within each handler call.
+            with contextlib.suppress(Exception):
+                event._auto_tool_all_delivered_urls = store
+        return store
+
+    def _filter_fresh_urls(
+        self, event: AstrMessageEvent, urls: list[str]
+    ) -> list[str]:
+        store = self._delivered_url_store(event)
+        fresh: list[str] = []
+        for url in urls:
+            if url and url not in store and url not in fresh:
+                fresh.append(url)
+        return fresh
+
+    def _mark_delivered_urls(self, event: AstrMessageEvent, urls: list[str]) -> None:
+        self._delivered_url_store(event).update(urls)
+
     async def _deliver_tool_media(
         self, event: AstrMessageEvent, response: Any, result_text: str
     ) -> str:
@@ -351,6 +499,7 @@ class AutoToolAll(Star):
 
         媒体来源有两处：内层响应消息链中的 Image/Video 组件，
         以及工具文本结果里的媒体直链。发送后临时文件立即清理。
+        与钩子层共用同一份已发送记录，避免同一链接双发。
         """
         if not self.media_delivery.enabled():
             return ""
@@ -360,11 +509,15 @@ class AutoToolAll(Star):
                 urls.append(url)
         if not urls:
             return ""
+        fresh = self._filter_fresh_urls(event, urls)
+        if not fresh:
+            return ""
         try:
-            report = await self.media_delivery.deliver(event, urls)
+            report = await self.media_delivery.deliver(event, fresh)
         except Exception:
             logger.exception("media delivery failed")
             return ""
+        self._mark_delivered_urls(event, fresh)
         if report.sent_images or report.sent_videos or report.fallback_urls:
             return report.summary()
         return ""

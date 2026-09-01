@@ -5,6 +5,28 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.2.3] - 2026-09-02
+
+本版本解决“用户要求下载图片发给自己时，机器人却调用生图工具画一张”的问题，并补齐媒体转发的两处覆盖盲区：搜索结果里没有媒体直链、模型绕过 `call_plugin_tool` 直接调用全局工具。
+
+### 新增
+
+- **`fetch_media` 媒体下载工具**：模型把图片/视频直链或网页链接交给本工具，插件下载后以 base64 媒体消息发出。收到 B 站视频页等网页链接时，自动抓取页面中的 `og:image` 封面与 `<img>` 插图候选（相对路径自动补全、og:image 优先、逐个过 SSRF 校验）；无法判定为网页的链接回退按内容类型直连下载。大小上限、数量上限与回退逻辑与现有媒体转发一致。
+- **任意工具结果自动媒体转发（钩子层）**：监听 `on_llm_tool_respond`，主 Agent 直接调用任意工具（如 anysearch）返回后，自动把结果中的媒体直链下载转发，不再依赖模型走 `call_plugin_tool`。同一次会话轮内相同 URL 只发一次；`call_plugin_tool`、`fetch_media`、生图类工具自带交付逻辑，自动跳过防重复。
+- 新增配置：`fetch_media_enabled`、`fetch_media_page_extract`、`fetch_media_page_max_kb`、`auto_deliver_tool_media`（默认全部开启）。
+
+### 变更
+
+- `call_plugin_tool` 引导语调整：搜索/信息类工具可直接调用，但“下载图片/视频发给我”类意图必须在拿到链接后调用 `fetch_media` 完成发送；找不到可下载媒体时如实告知用户，不得改用生图工具冒充下载结果。
+- `_deliver_tool_media` 与钩子层共用同一份“本轮已发送 URL”记录（挂在事件对象上），杜绝同一链接双发。
+- `fetch_media` 加入插件内部工具名单（`INTERNAL_TOOLS`），不能被 `call_plugin_tool` 递归调用。
+
+### 安全
+
+- 网页抓图仅接受 text/html 且限制单页大小（`fetch_media_page_max_kb`，默认 2048KB），重定向逐跳复查 SSRF；提取出的每个候选 URL 重新过公开地址校验（拒绝内网/回环/链路本地）。
+- 钩子层全程防御式解析工具结果（兼容 CallToolResult 与纯文本载荷），异常只记日志，不影响消息主流程。
+
+[v0.2.3]: https://github.com/linlin269/astrbot_plugin_auto_tool_all/compare/v0.2.2...v0.2.3
 ## [v0.2.2] - 2026-09-01
 
 本版本新增两项能力：工具返回媒体（图片/视频）的 base64 转发，以及 OpenAI 兼容接口的模型查看与逐模型测速。

@@ -90,6 +90,30 @@
     "default": 5,
     "hint": "一次工具调用结果中最多转发的图片/视频数量，防止刷屏。"
   },
+  "fetch_media_enabled": {
+    "description": "启用 fetch_media 媒体下载工具",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后模型调用 fetch_media 会收到“功能已关闭”的提示；媒体转发总开关 deliver_media_base64 仍独立生效。"
+  },
+  "fetch_media_page_extract": {
+    "description": "网页链接自动提取图片",
+    "type": "bool",
+    "default": true,
+    "hint": "fetch_media 收到 B 站视频页等网页链接时，抓取页面中的 og:image 封面与插图下载发送；关闭后只接受图片/视频直链。"
+  },
+  "fetch_media_page_max_kb": {
+    "description": "网页抓取大小上限（KB）",
+    "type": "int",
+    "default": 2048,
+    "hint": "单次页面抓取的 HTML 大小上限，超限按失败处理并回退为直链尝试。"
+  },
+  "auto_deliver_tool_media": {
+    "description": "任意工具结果自动转发媒体",
+    "type": "bool",
+    "default": true,
+    "hint": "主 Agent 直接调用任意工具（如 anysearch）返回后，自动把结果中的媒体直链下载并以 base64 发出；call_plugin_tool 与 fetch_media 自带交付，不会重复发送。"
+  },
   "probe_enabled": {
     "description": "启用模型查看/测速触发",
     "type": "bool",

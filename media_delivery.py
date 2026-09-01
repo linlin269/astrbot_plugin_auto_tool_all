@@ -65,6 +65,47 @@ def extract_media_urls_from_text(text: str) -> list[str]:
 
 _HTTP_URL_RE = re.compile(r"https?://[^\s<>\"'，。；、）)】\]]+", re.IGNORECASE)
 
+# 页面抓图：og/twitter 封面优先，其次 <img>；content 属性位置不限。
+_META_IMAGE_TAG_RE = re.compile(
+    r"<meta\b[^>]*?\b(?:property|name)\s*=\s*['\"]"
+    r"(?:og:image(?::secure_url)?|twitter:image(?::src)?)['\"][^>]*>",
+    re.IGNORECASE,
+)
+_META_CONTENT_RE = re.compile(r"\bcontent\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_IMG_SRC_RE = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+
+
+def extract_media_urls_from_html(
+    html: str, base_url: str, limit: int = 10
+) -> list[str]:
+    """Pull image candidates out of page HTML: og/twitter meta first, then <img>.
+
+    Relative URLs are resolved against base_url; only public http(s) addresses
+    pass (data URIs and intranet hosts are dropped). Order preserved, deduped.
+    """
+    text = str(html or "")
+    base = str(base_url or "")
+    candidates: list[str] = []
+
+    def _push(raw: str) -> None:
+        if len(candidates) >= limit:
+            return
+        url = urljoin(base, str(raw or "").strip())
+        if not url.lower().startswith(("http://", "https://")):
+            return
+        if not AvatarService.is_safe_http_url(url):
+            return
+        if url not in candidates:
+            candidates.append(url)
+
+    for tag in _META_IMAGE_TAG_RE.finditer(text):
+        content = _META_CONTENT_RE.search(tag.group(0))
+        if content:
+            _push(content.group(1))
+    for raw in _IMG_SRC_RE.findall(text):
+        _push(raw)
+    return candidates
+
 
 def _classify_by_extension(url: str) -> str:
     try:
@@ -132,6 +173,9 @@ class MediaDeliveryService:
 
     def max_count(self) -> int:
         return self._int_config("media_max_count", 5, 10)
+
+    def page_max_bytes(self) -> int:
+        return self._int_config("fetch_media_page_max_kb", 2048, 20480) * 1024
 
     def enabled(self) -> bool:
         value = self.config.get("deliver_media_base64", True)
@@ -208,6 +252,108 @@ class MediaDeliveryService:
                     else:
                         report.fallback_urls.append(url)
         return report
+
+    async def fetch_page_html(self, url: str) -> str:
+        """Download one HTML page (type and size limited) for image extraction."""
+        if not AvatarService.is_safe_http_url(url):
+            raise MediaSkipError("地址不安全（内网/回环/非 http）。")
+        try:
+            import aiohttp
+        except ImportError as exc:  # pragma: no cover - requirements installs it
+            raise MediaSkipError("缺少 aiohttp 依赖。") from exc
+
+        max_bytes = self.page_max_bytes()
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        current_url = url
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+            for _ in range(_MAX_REDIRECTS):
+                if not AvatarService.is_safe_http_url(current_url):
+                    raise MediaSkipError("重定向地址不安全。")
+                async with session.get(
+                    current_url,
+                    allow_redirects=False,
+                    headers={"User-Agent": _USER_AGENT},
+                ) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location", "").strip()
+                        if not location:
+                            raise MediaSkipError("无效重定向。")
+                        current_url = urljoin(current_url, location)
+                        continue
+                    if response.status < 200 or response.status >= 300:
+                        raise MediaSkipError(f"HTTP {response.status}。")
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if "html" not in content_type and not content_type.startswith(
+                        "text/"
+                    ):
+                        raise MediaSkipError(f"非网页类型（{content_type or 'unknown'}）。")
+                    body = await response.content.read(max_bytes + 1)
+                    if not body:
+                        raise MediaSkipError("页面为空。")
+                    if len(body) > max_bytes:
+                        raise MediaSkipError(f"页面超过 {max_bytes // 1024}KB 上限。")
+                    charset = "utf-8"
+                    for part in content_type.split(";"):
+                        piece = part.strip()
+                        if piece.startswith("charset="):
+                            charset = piece.split("=", 1)[1].strip("'\" ") or "utf-8"
+                    try:
+                        return body.decode(charset, errors="replace")
+                    except (LookupError, UnicodeDecodeError):
+                        return body.decode("utf-8", errors="replace")
+        raise MediaSkipError("重定向次数过多。")
+
+    async def fetch_media_result(
+        self, event: Any, urls: list[str], *, page_extract: bool = True
+    ) -> str:
+        """Download and send media from direct links or page links.
+
+        Direct media links go straight to deliver(); page links are fetched and
+        their og:image / <img> candidates extracted first. Extension-less links
+        fall back to the content-type check in _download. Returns an LLM-facing
+        summary that reports failure honestly instead of promising media.
+        """
+        candidates: list[str] = []
+        page_urls: list[str] = []
+        for raw in urls or []:
+            url = str(raw or "").strip()
+            if not url or not AvatarService.is_safe_http_url(url):
+                continue
+            if url in candidates or url in page_urls:
+                continue
+            if _classify_by_extension(url) or not page_extract:
+                candidates.append(url)
+            else:
+                page_urls.append(url)
+        cap = self.max_count()
+        candidates = candidates[:cap]
+        page_urls = page_urls[:cap]
+
+        for url in page_urls:
+            try:
+                html = await self.fetch_page_html(url)
+            except MediaSkipError as exc:
+                self._log("debug", "page fetch skipped %s: %s", url, exc)
+                # Not a page (or unreachable): let _download classify by type.
+                candidates.append(url)
+                continue
+            found = extract_media_urls_from_html(html, url, limit=cap)
+            if found:
+                candidates.extend(found)
+            else:
+                candidates.append(url)
+
+        if not candidates:
+            return "没有可处理的链接：所有 URL 都为空或未通过安全校验。"
+
+        report = await self.deliver(event, candidates)
+        if report.sent_images or report.sent_videos:
+            return report.summary()
+        lines = ["这些链接里没有找到能下载发送的图片/视频。"]
+        if report.fallback_urls:
+            lines.append("可以把下面的原始链接发给用户自行查看：")
+            lines.extend(f"- {url}" for url in report.fallback_urls)
+        return "\n".join(lines)
 
     async def _send_one(
         self,

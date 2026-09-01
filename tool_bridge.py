@@ -27,6 +27,7 @@ class ToolBridge:
         {
             "list_available_tools",
             "call_plugin_tool",
+            "fetch_media",
             "avatar_draw",
         }
     )
