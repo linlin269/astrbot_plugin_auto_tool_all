@@ -114,6 +114,24 @@
     "default": true,
     "hint": "主 Agent 直接调用任意工具（如 anysearch）返回后，自动把结果中的媒体直链下载并以 base64 发出；call_plugin_tool 与 fetch_media 自带交付，不会重复发送。"
   },
+  "fetch_media_filter_noise": {
+    "description": "抓图噪声规则过滤",
+    "type": "bool",
+    "default": true,
+    "hint": "网页抓图时剔除图标、站标、头像、二维码、跟踪像素等干扰候选（含声明尺寸小于 64px 的小图）；og:image 封面仅拦头像类特征，避免误杀内容图。若个别站点被误杀可关闭。"
+  },
+  "llm_filter_enabled": {
+    "description": "AI 审阅精筛",
+    "type": "bool",
+    "default": true,
+    "hint": "规则粗筛后再用当前聊天模型（需支持视觉）看图剔除干扰图，并按用户意图挑选内容图；模型不支持视觉、超时或输出无法解析时自动跳过，不会误删。"
+  },
+  "llm_filter_timeout": {
+    "description": "AI 审阅超时（秒）",
+    "type": "int",
+    "default": 20,
+    "hint": "单次 AI 审阅的等待上限，超时自动跳过精筛，直接发送规则粗筛结果。"
+  },
   "probe_enabled": {
     "description": "启用模型查看/测速触发",
     "type": "bool",

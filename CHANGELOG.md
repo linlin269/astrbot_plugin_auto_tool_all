@@ -5,6 +5,24 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.2.4] - 2026-09-02
+
+本版本解决 fetch_media 抓取网页时把网站图标、站标、用户头像等干扰图一并发出的体验问题，实现"规则粗筛 + AI 精筛"两级清洗。
+
+### 新增
+
+- **规则粗筛（第一级）**：抓取页面时按完整 `<img>` 标签解析，依据 URL 特征（favicon/logo/icon/sprite/二维码/跟踪像素等）、头像特征（avatar/gravatar/qlogo/B 站 `/face/` 目录）、标签 class/id/alt 语义、声明尺寸（宽高均小于 64px 视为装饰）过滤干扰候选；补采懒加载 `data-src` 系属性与 `<video poster>` 封面。og:image 封面只拦头像类特征，避免误杀内容图。
+- **AI 审阅精筛（第二级）**：规则粗筛后，把候选图以 `base64://` 引用交给当前聊天模型（需支持视觉）看图审阅——剔除图标/头像等非内容图，并按 `fetch_media` 新增的 `user_intent` 参数（用户诉求要点）挑选内容图。模型不支持视觉、超时（`llm_filter_timeout`，默认 20 秒）或输出无法解析时自动跳过（fail-open，不误删）；视频与超大图直接保留不送审。
+- 全灭兜底：AI 判定全部候选都是干扰图时，如实告知用户"没有找到符合要求的内容图片"并附原始链接，不发噪声图。
+- 新增配置：`fetch_media_filter_noise`、`llm_filter_enabled`、`llm_filter_timeout`（默认开启/20 秒）。
+
+### 变更
+
+- 媒体交付拆分为"下载准备"（`prepare_media`）与"发送"（`send_prepared`）两阶段，`deliver` 与 `fetch_media_result` 共用；行为与旧版一致（图片批量发、视频逐个发、失败回退 URL）。
+- `fetch_media` 对同一次会话轮内已发送过的链接直接返回"刚刚已经发送过"，避免重复下载刷屏。
+- 审阅输出解析（`parse_kept_indexes`）为纯函数：非 JSON、非整数、越界编号一律 fail-open，明确空数组才判定"全部为干扰图"。
+
+[v0.2.4]: https://github.com/linlin269/astrbot_plugin_auto_tool_all/compare/v0.2.3...v0.2.4
 ## [v0.2.3] - 2026-09-02
 
 本版本解决“用户要求下载图片发给自己时，机器人却调用生图工具画一张”的问题，并补齐媒体转发的两处覆盖盲区：搜索结果里没有媒体直链、模型绕过 `call_plugin_tool` 直接调用全局工具。

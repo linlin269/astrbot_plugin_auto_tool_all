@@ -6,7 +6,7 @@
 
 - `list_available_tools`：列出当前 active 的外部 LLM 工具。
 - `call_plugin_tool`：通过工具名和 JSON 参数调用其它 `llm_tool`、`FunctionTool` 或 MCP 工具；返回中的图片/视频自动下载后以 base64 消息转发。
-- `fetch_media`：把图片/视频直链或网页链接（如 B 站视频页）下载后，以 base64 媒体消息发给用户；网页链接自动提取页面中的 `og:image` 封面与插图。用户说"下载后发给我"时由模型调用。
+- `fetch_media`：把图片/视频直链或网页链接（如 B 站视频页）下载后，以 base64 媒体消息发给用户；网页链接自动提取封面/插图，并经"规则粗筛 + AI 精筛"两级清洗剔除图标、头像等干扰图。用户说"下载后发给我"时由模型调用。
 - `probe`（事件监听）：对 OpenAI 兼容接口"看看里面有什么模型 / 帮我测试一下里面的模型"，逐模型测出首字时间与总回复时间并汇总。
 - `avatar_draw`：获取机器人、发送者或被 @ 用户的 QQ 头像，合并当前消息图、回复引用图和外部图片 URL，调用生图工具。
 - 工具列表在每次调用时动态读取，因此未来新安装并注册为 LLM 工具的插件无需修改本插件即可被发现。
@@ -17,6 +17,7 @@
 搜索等工具返回的图片/视频链接，QQ 客户端直接拉 URL 经常失败（防盗链、内网、被墙图床）。本插件把这类媒体**下载后转 base64** 再发：
 
 - **三条覆盖路径**：① `fetch_media` 工具（模型主动调用，支持直链与网页链接）；② `call_plugin_tool` 结果交付；③ 任意工具结果钩子（`on_llm_tool_respond`，主 Agent 直接调用 anysearch 等全局工具时也生效）。三条路径共用"本轮已发送 URL"记录，同一链接不会双发。
+- **两级清洗（fetch_media 网页抓图）**：第一级规则粗筛按 URL/标签特征剔除图标、站标、头像、二维码、小尺寸装饰图（`fetch_media_filter_noise`）；第二级 AI 审阅把候选图交给当前聊天模型看图，剔除残余干扰并按用户诉求挑选内容图（`llm_filter_enabled`，模型不支持视觉/超时/解析失败时自动跳过不误删）。全被过滤时如实告知，不发噪声图。
 - **行为约定**：链接里提取不到可下载媒体时，机器人如实告知"没找到可直接下载的图片"并附原始链接，不会改用生图工具把"生成的图"冒充"下载的图"。
 - 图片上限 10MB（`media_image_max_mb`）、视频上限 100MB（`media_video_max_mb`）；超限、下载失败或发送失败自动**回退为发 URL**。
 - 单次最多转发 5 个（`media_max_count`）；总开关 `deliver_media_base64`。
@@ -157,6 +158,9 @@ selfie_image 的 `generate_image` 内部会把带“自拍/合影/同框/和我/
 - `fetch_media_enabled`：`fetch_media` 工具运行时开关（默认开启）。
 - `fetch_media_page_extract`：网页链接自动提取封面/插图开关（默认开启）。
 - `fetch_media_page_max_kb`：单次页面抓取的 HTML 大小上限（默认 2048KB）。
+- `fetch_media_filter_noise`：抓图规则粗筛开关，剔除图标/头像/装饰图（默认开启）。
+- `llm_filter_enabled`：AI 审阅精筛开关，需聊天模型支持视觉（默认开启）。
+- `llm_filter_timeout`：单次 AI 审阅超时秒数（默认 20）。
 - `auto_deliver_tool_media`：任意工具结果自动转发媒体开关（默认开启）。
 - `probe_enabled`、`probe_concurrency`、`probe_timeout_seconds`、`probe_memory_ttl_minutes`：模型查看/测速的开关、并发数、单模型超时与 url/key 记忆时长。
 

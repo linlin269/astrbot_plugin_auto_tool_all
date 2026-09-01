@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 import time
@@ -24,7 +25,11 @@ from .context_clear import (
     session_label,
 )
 from .event_images import extract_image_sources
-from .media_delivery import MediaDeliveryService, extract_media_urls_from_text
+from .media_delivery import (
+    MediaDeliveryService,
+    extract_media_urls_from_text,
+    parse_kept_indexes,
+)
 from .openai_probe import (
     OpenAIProbeService,
     ProbeError,
@@ -50,6 +55,10 @@ _AUTO_DELIVER_SKIP_TOOLS = frozenset(
         "generate_selfie",
     }
 )
+
+# AI 精筛单图 base64 上限（字符数，约 6MB 原图）；超大的图直接保留不送审，
+# 避免一张大图触发视觉接口报错导致整次审阅失败。
+_REVIEW_MAX_PAYLOAD_CHARS = 8_000_000
 
 # 模型测速：达到该数量才先发“开始测试”预告，小列表直接等结果。
 _TEST_ACK_THRESHOLD = 6
@@ -363,36 +372,119 @@ class AutoToolAll(Star):
         return result_text
 
     @filter.llm_tool(name="fetch_media")
-    async def fetch_media(self, event: AstrMessageEvent, urls: list[str]) -> str:
+    async def fetch_media(
+        self, event: AstrMessageEvent, urls: list[str], user_intent: str = ""
+    ) -> str:
         """把图片/视频直链或含媒体的网页链接下载后，以 base64 图片/视频消息发给用户。
 
         当用户要求“下载后发给我”“把这张图/视频发给我”“把搜到的图发我”，
         或需要把搜索结果、前文提到的链接变成真正的媒体消息时调用。
         urls 可填图片/视频直链（如 https://.../xxx.jpg），也可填 B 站视频页等
-        网页链接（自动提取页面中的封面图与插图）。
+        网页链接（自动提取页面中的封面图与插图，并剔除图标/头像等干扰图，
+        再由 AI 按用户诉求审阅挑选）。
         一次最多发送 media_max_count 个媒体；临时文件发送后立即删除。
 
-        行为约定：如果所有链接都提取不到可下载的媒体，就如实告诉用户
+        行为约定：如果所有链接都提取不到可下载的内容图片，就如实告诉用户
         “没找到可直接下载的图片/视频”，并把原始链接发给用户自行查看；
         禁止改用 generate_image 等生图工具，把生成的图冒充下载的图。
         生图工具只用于用户明确要求“画一张/生成一张”的场景。
         Args:
             urls(array[string]): 图片/视频直链或含媒体的网页链接列表，例如 ["https://www.bilibili.com/video/BV1H8411r735/"]。
+            user_intent(string): 用户对图片的原始诉求要点，如“Q版企鹅二创壁纸”；AI 审阅时会用它匹配内容，可留空。
         """
         if not self._as_bool("fetch_media_enabled", True):
             return "管理员已关闭媒体下载功能（fetch_media_enabled）。"
         normalized = self._normalize_urls(urls)
         if not normalized:
             return "没有收到任何链接。请把图片/视频直链或网页链接放进 urls 参数。"
+        fresh = self._filter_fresh_urls(event, normalized)
+        if not fresh:
+            return "这些链接的图片刚刚已经发送过了，没有新的媒体需要下载。"
         try:
-            return await self.media_delivery.fetch_media_result(
+            async def _review(prepared, intent, page_title):
+                return await self._llm_review_media(event, prepared, intent, page_title)
+
+            result = await self.media_delivery.fetch_media_result(
                 event,
-                normalized,
+                fresh,
                 page_extract=self._as_bool("fetch_media_page_extract", True),
+                filter_noise=self._as_bool("fetch_media_filter_noise", True),
+                review=_review,
+                intent=str(user_intent or "").strip(),
             )
         except Exception:  # pragma: no cover - network/platform specific
             logger.exception("fetch_media failed")
             return "下载媒体时发生异常，请稍后再试，或把原始链接直接发给用户查看。"
+        self._mark_delivered_urls(event, fresh)
+        return result
+
+    async def _llm_review_media(
+        self,
+        event: AstrMessageEvent,
+        prepared: list[tuple[str, str, str]],
+        intent: str,
+        page_title: str,
+    ) -> list[int] | None:
+        """AI 精筛（第二级清洗）：让当前聊天模型看图剔除干扰图并按意图挑选。
+
+        返回应保留的 prepared 下标列表；返回 None 表示审阅不可用（模型不
+        支持视觉、超时、解析失败），调用方按约定 fail-open 全部发送。
+        视频与超大图片不送审，直接保留。
+        """
+        if not self._as_bool("llm_filter_enabled", True):
+            return None
+        reviewable: list[tuple[int, str]] = []
+        auto_keep: set[int] = set()
+        for index, (url, kind, payload) in enumerate(prepared):
+            if kind == "image" and len(payload) <= _REVIEW_MAX_PAYLOAD_CHARS:
+                reviewable.append((index, payload))
+            else:
+                auto_keep.add(index)
+        if not reviewable:
+            return sorted(auto_keep)
+
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            getter = getattr(self.context, "get_current_chat_provider_id", None)
+            provider_id = str(await getter(umo)) if callable(getter) else ""
+            getter = getattr(self.context, "get_provider_by_id", None)
+            provider = await getter(provider_id) if callable(getter) else None
+        except Exception:  # pragma: no cover - provider manager differences
+            provider = None
+        if not provider_id or provider is None:
+            self._debug("llm review skipped: no chat provider available")
+            return None
+
+        count = len(reviewable)
+        prompt = (
+            "你是发往聊天软件的图片审阅员。下面按顺序给出"
+            f"{count} 张候选图片（编号 0 到 {count - 1}），它们来自同一个网页。"
+            "请剔除其中的网站图标、站标、用户头像、表情符号、装饰按钮、二维码、"
+            "跟踪像素等非内容图片；保留真正的内容图片（壁纸、照片、插画、"
+            "截图、封面等）。\n"
+            f"页面标题：{page_title or '未知'}\n"
+            f"用户想要的图片：{intent or '未特别说明，按常规内容图片标准判断'}\n"
+            "只输出一个 JSON 数组，包含应保留的候选编号，例如 [0,2]；"
+            "如果全部都是干扰图，输出 []。不要输出任何其他文字。"
+        )
+        try:
+            timeout = self._int_config("llm_filter_timeout", 20, 120)
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    image_urls=[f"base64://{payload}" for _, payload in reviewable],
+                ),
+                timeout=timeout,
+            )
+        except Exception as exc:  # pragma: no cover - provider/network specific
+            self._debug("llm review failed: %s", exc)
+            return None
+        kept = parse_kept_indexes(ToolBridge.response_text(response), count)
+        if kept is None:
+            self._debug("llm review output unparseable; fail-open")
+            return None
+        keep = auto_keep | {reviewable[index][0] for index in kept}
+        return sorted(keep)
 
     @filter.on_llm_tool_respond()
     async def auto_deliver_tool_media(
