@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -33,6 +34,51 @@ _CLEAR_USAGE = (
     "/清空上文 6s|6秒|5min|5分钟|1h|1小时 —— 定时清空当前会话上下文\n"
     "/查看清空上文定时任务 —— 查看当前定时任务\n"
     "/取消清空上文定时任务 序号|qq号|群号|all —— 取消定时任务"
+)
+
+# astrbot_plugin_selfie_image 的 generate_image 会按这些词把请求改道到
+# “AI 自拍”流程，并以机器人形象图作为身份锚点，导致画谁都是机器人。
+# 为非 bot 身份合成提示词时，把这些触发词改写成不会命中的等价说法。
+_LOOKALIKE_REWRITES_ZH: tuple[tuple[str, str], ...] = (
+    ("我们一起", "两位人物共同"),
+    ("你的照片", "目标人物的照片"),
+    ("你自己", "目标人物本人"),
+    ("你和我", "两位人物"),
+    ("我和你", "两位人物"),
+    ("形象照", "个人形象写真"),
+    ("一起拍", "共同拍摄"),
+    ("一起照", "共同拍摄"),
+    ("合影", "多人物同画面"),
+    ("合照", "多人物同画面"),
+    ("同框", "同画面"),
+    ("自拍", "个人生活照"),
+    ("陪我", "为发送者"),
+    ("和我", "为发送者"),
+    ("跟我", "为发送者"),
+    ("与我", "为发送者"),
+    ("和你", "与机器人"),
+    ("跟你", "与机器人"),
+    ("与你", "与机器人"),
+)
+_LOOKALIKE_REWRITES_EN: tuple[tuple[str, str], ...] = (
+    ("take a picture together", "people together in one shot"),
+    ("take a photo together", "people together in one shot"),
+    ("in the same frame", "in one frame"),
+    ("group selfie", "multi-person portrait"),
+    ("group photo", "multi-person photo"),
+    ("photo together", "people together in one shot"),
+    ("your photo", "the target person's photo"),
+    ("yourself", "the target person"),
+    ("next to me", "next to the target person"),
+    ("next to you", "next to the bot character"),
+    ("with me", "with the target person"),
+    ("with you", "with the bot character"),
+    ("same frame", "one frame"),
+    ("side by side", "side-by-side"),
+    ("ai assistant", "the character"),
+    ("selfie", "self-portrait"),
+    ("catgirl", "original character"),
+    ("ahwu", "original character"),
 )
 
 
@@ -269,13 +315,14 @@ class AutoToolAll(Star):
         当用户想用“你的头像/我的头像/TA 的头像”画画或修改图片时调用。
         典型触发包括“看看你”（用机器人自己的 QQ 头像画自己）、“看看我”、
         “@某人 看看他”、“把图里的人物换成你”，以及“先搜索一张图，再把图里的人换成你”。
-        用户说“你/机器人”时 identity 传 bot；说“我/我的”时传 sender；
-        说“他/她/TA”或消息中明确 @ 某人时传 at。
+        identity 必须按人物归属严格传参：用户说“我/我的/我自己”必须传 sender，
+        说“你/机器人/你自己”必须传 bot，消息中明确 @ 了其他人时传 at。
+        不要省略 identity，也不要传列表之外的值。
         当前消息直接附带图片、回复/引用带图片的消息，都会自动作为图生图输入。
         只有已注册为 LLM 工具的生图能力可被调用；普通 /指令 不在本工具范围内。
         Args:
             prompt(string): 用户想要的画面或修改要求，保留动作、场景、风格，以及头像人物和原图之间的关系。
-            identity(string): 头像归属，只能使用 bot（机器人）、sender（发送者）、at（被@用户）。
+            identity(string): 头像归属，只能使用 bot（机器人）、sender（发送者）、at（被@用户）。“看看我”必须传 sender。
             count(number): 生成张数，默认 1。
             reference_image_urls(array[string]): 上一步搜索或其它工具返回的外部图片 URL，可为空数组。
             ack_message(string): 可选的中文进度短句，10 到 40 字。
@@ -287,7 +334,6 @@ class AutoToolAll(Star):
         if not prompt_text:
             return "缺少绘图要求，请说明想画什么或怎样修改图片。"
 
-        normalized_identity = self.avatar_service.normalize_identity(identity)
         external_urls = self._normalize_urls(reference_image_urls)
         source_images = extract_image_sources(event)
         if (
@@ -300,36 +346,53 @@ class AutoToolAll(Star):
             )
 
         try:
+            normalized_identity = self.avatar_service.normalize_identity(identity)
+            self._debug(
+                "avatar_draw: identity %r -> %s", identity, normalized_identity
+            )
             target = await self.avatar_service.resolve_for_event(
                 event, normalized_identity
             )
+            self._debug("avatar_draw: resolved qq=%s url=%s", target.qq, target.url)
             max_refs = self._int_config("max_reference_images", 4, minimum=1, maximum=8)
             external_paths = await self.avatar_service.download_external_images(
                 external_urls,
                 max_count=max(0, max_refs - 1),
             )
-            image_tool_name = self._choose_image_tool()
+            image_tool_name = self._choose_image_tool(normalized_identity)
             if not image_tool_name:
                 return (
-                    "没有找到可用的生图 LLM 工具。请确认 astrbot_plugin_selfie_image 已加载，"
-                    "并在其 Web 面板开启 image_enable_llm_tool；也可以在本插件配置中指定其它生图工具名。"
+                    "没有找到可用的生图 LLM 工具。"
+                    "画“我/TA”这类身份需要支持参考图传入的工具（如 generate_image）；"
+                    "generate_selfie 只能以机器人自己的形象出镜，已被自动跳过。"
+                    "请确认 astrbot_plugin_selfie_image 已加载并在其 Web 面板开启 "
+                    "image_enable_llm_tool，或在本插件配置 image_tool_name 指定其它生图工具。"
                 )
+            self._debug(
+                "avatar_draw: tool=%s event_images=%d external=%d",
+                image_tool_name,
+                len(source_images),
+                len(external_paths),
+            )
 
+            if normalized_identity != "bot":
+                prompt_text = self._sanitize_bot_lookalike_phrases(prompt_text)
             composed_prompt = self._compose_avatar_prompt(
                 prompt_text,
                 normalized_identity,
                 has_source=bool(source_images or external_paths),
             )
+            reference_paths = [target.path, *external_paths]
             args = self._image_tool_arguments(
                 image_tool_name,
                 composed_prompt,
                 count=count,
                 ack_message=ack_message,
-                reference_paths=[target.path, *external_paths],
+                reference_paths=reference_paths,
                 event_sources=[item.source for item in source_images],
             )
             with self._inject_reference_images(
-                event, [target.path, *external_paths], max_refs=max_refs
+                event, reference_paths, max_refs=max_refs
             ):
                 result = await self.tool_bridge.invoke(
                     event,
@@ -389,6 +452,20 @@ class AutoToolAll(Star):
             return value.strip().lower() not in {"", "0", "false", "no", "off"}
         return bool(value)
 
+    def _debug_enabled(self) -> bool:
+        return self._as_bool("debug_logging", False)
+
+    def _debug(self, message: str, *args: Any) -> None:
+        if not self._debug_enabled():
+            return
+        method = getattr(logger, "debug", None)
+        if not callable(method):
+            return
+        try:
+            method(f"{PLUGIN_NAME} {message}", *args)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
     def _int_config(self, key: str, default: int, *, minimum: int, maximum: int) -> int:
         try:
             value = int(self.config.get(key, default))
@@ -396,7 +473,10 @@ class AutoToolAll(Star):
             value = default
         return max(minimum, min(value, maximum))
 
-    def _choose_image_tool(self) -> str:
+    def _choose_image_tool(self, identity: str = "bot") -> str:
+        # selfie-only tools always render the bot's own persona; when drawing
+        # someone else's avatar they would silently ignore the injected refs.
+        selfie_only = {"generate_selfie"}
         configured: list[str] = []
         preferred = str(
             self.config.get("image_tool_name", "generate_image") or ""
@@ -417,6 +497,14 @@ class AutoToolAll(Star):
             if name in seen or name in _INTERNAL_TOOL_NAMES:
                 continue
             seen.add(name)
+            if identity != "bot" and name.lower() in selfie_only:
+                if self._debug_enabled():
+                    logger.debug(
+                        "%s skipped tool %s: it can only draw the bot itself",
+                        PLUGIN_NAME,
+                        name,
+                    )
+                continue
             try:
                 self.tool_bridge.get_target_tool(name)
             except ToolBridgeError:
@@ -525,6 +613,20 @@ class AutoToolAll(Star):
         return any(keyword in prompt for keyword in keywords)
 
     @staticmethod
+    def _sanitize_bot_lookalike_phrases(prompt: str) -> str:
+        """Rewrite selfie-trigger words so selfie_image stays on the draw path."""
+        text = str(prompt or "")
+        for phrase, replacement in _LOOKALIKE_REWRITES_ZH:
+            text = text.replace(phrase, replacement)
+        lowered = text.lower()
+        for phrase, replacement in _LOOKALIKE_REWRITES_EN:
+            if phrase in lowered:
+                pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+                text = pattern.sub(replacement, text)
+                lowered = text.lower()
+        return text
+
+    @staticmethod
     def _compose_avatar_prompt(prompt: str, identity: str, *, has_source: bool) -> str:
         labels = {
             "bot": "机器人自己的 QQ 头像",
@@ -533,17 +635,25 @@ class AutoToolAll(Star):
         }
         identity_label = labels.get(identity, "目标用户的 QQ 头像")
         if has_source:
-            return (
+            relationship = (
                 f"{prompt}\n\n"
                 f"参考图关系：临时追加的参考图中包含{identity_label}，请将其中的人物身份/脸部特征"
                 "作为需要保留的身份参考；当前消息或引用消息中的图片是用户提供的原图，按上面的要求进行图生图。"
                 "不要把本地文件路径或参考图编号写进结果。"
             )
-        return (
-            f"{prompt}\n\n"
-            f"身份参考：使用临时追加的{identity_label}作为人物身份参考，生成一张完整图片。"
-            "保持人物身份特征清晰，不要输出本地文件路径。"
-        )
+        else:
+            relationship = (
+                f"{prompt}\n\n"
+                f"身份参考：使用临时追加的{identity_label}作为人物身份参考，生成一张完整图片。"
+                "保持人物身份特征清晰，不要输出本地文件路径。"
+            )
+        if identity != "bot":
+            relationship += (
+                "\n\n重要：本次画面的主角不是机器人/AI 助手本人。"
+                "必须以上述 QQ 头像参考图中的人物为唯一身份来源，"
+                "忽略任何内置的 AI 自身形象参考图，禁止用机器人形象替换或融合主角长相。"
+            )
+        return relationship
 
     @contextmanager
     def _inject_reference_images(

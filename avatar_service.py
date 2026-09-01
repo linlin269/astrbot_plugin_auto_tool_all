@@ -16,6 +16,36 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 _QQ_RE = re.compile(r"^\d{4,12}$")
+# Spoken phrasings the drawing model may pass as identity. Unknown explicit
+# values must raise instead of silently falling back to "bot", otherwise a
+# "看看我" request would be drawn with the bot's own avatar.
+_IDENTITY_ALIASES = {
+    "you": "bot",
+    "yourself": "bot",
+    "ai": "bot",
+    "你": "bot",
+    "你自己": "bot",
+    "机器人": "bot",
+    "机器人自己": "bot",
+    "自己": "bot",
+    "我的": "sender",
+    "我": "sender",
+    "我自己": "sender",
+    "我本人": "sender",
+    "me": "sender",
+    "myself": "sender",
+    "my": "sender",
+    "mine": "sender",
+    "user": "sender",
+    "发送者": "sender",
+    "本人": "sender",
+    "他": "at",
+    "她": "at",
+    "ta": "at",
+    "他人": "at",
+    "被@的人": "at",
+    "被at的人": "at",
+}
 _ALLOWED_MIME_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -58,27 +88,18 @@ class AvatarService:
 
     @staticmethod
     def normalize_identity(identity: Any) -> str:
-        value = str(identity or "bot").strip().lower()
-        aliases = {
-            "you": "bot",
-            "yourself": "bot",
-            "你": "bot",
-            "机器人": "bot",
-            "自己": "bot",
-            "我的": "sender",
-            "我": "sender",
-            "me": "sender",
-            "user": "sender",
-            "发送者": "sender",
-            "本人": "sender",
-            "他": "at",
-            "她": "at",
-            "ta": "at",
-            "他人": "at",
-            "被@的人": "at",
-            "被at的人": "at",
-        }
-        return aliases.get(value, value if value in {"bot", "sender", "at"} else "bot")
+        """Map spoken phrasings; unknown explicit values raise AvatarError."""
+        raw = str(identity or "bot").strip()
+        value = raw.lower()
+        if not value:
+            return "bot"
+        normalized = _IDENTITY_ALIASES.get(value, value if value in {"bot", "sender", "at"} else "")
+        if not normalized:
+            raise AvatarError(
+                f"无法识别的头像身份 {raw!r}，identity 只能使用 "
+                "bot（机器人）、sender（发送者）或 at（被@用户）。"
+            )
+        return normalized
 
     @staticmethod
     def _first_nonempty(values: Iterable[Any]) -> str:
@@ -176,6 +197,15 @@ class AvatarService:
             spec = 640
         url = self.avatar_url(qq, spec=spec)
         path = await self.get_or_download(url, namespace="avatar", key=f"{qq}:{spec}")
+        if self._debug_enabled():
+            self._log(
+                "debug",
+                "avatar resolved: identity=%s qq=%s spec=%d path=%s",
+                normalized,
+                qq,
+                spec,
+                path,
+            )
         return AvatarTarget(identity=normalized, qq=qq, url=url, path=path)
 
     @staticmethod
@@ -192,6 +222,12 @@ class AvatarService:
             if str(value) not in excluded:
                 return str(value)
         return ""
+
+    def _debug_enabled(self) -> bool:
+        value = self.config.get("debug_logging", False)
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "0", "false", "no", "off"}
+        return bool(value)
 
     def cache_ttl_seconds(self) -> int:
         try:

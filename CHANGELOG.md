@@ -5,6 +5,26 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.2.1] - 2026-09-01
+
+本版本修复“看看我”画出来仍是机器人形象的问题：`avatar_draw` 链路中的身份解析与下游 selfie_image 的自拍流程劫持都做了防护。
+
+### 修复
+
+- **身份参数不再静默兜底为 bot**：`normalize_identity` 收到无法识别的值（如 `self`、`某个人`）时返回错误说明并列出合法取值，让上层模型带正确参数重试；此前任何未知值都会被当成“机器人”处理，导致“看看我”画成机器人头像。
+- **新增身份别名**：`我自己`、`我本人`、`myself`、`my`、`mine`、`用户`、`ai`、`你自己`、`机器人自己` 等口语说法可正确解析。
+- **非机器人身份自动跳过 selfie 专用工具**：`identity` 为 `sender`/`at` 时，`generate_selfie` 这类固定以机器人形象出镜的工具不再参与首选或回退，避免头像被无视、画出机器人；此时找不到可用工具会返回明确原因。
+- **防 selfie 流程劫持**：为非机器人身份合成提示词时，把 selfie_image 意图路由的触发词（自拍/合影/合照/同框/形象照/和你/跟我/一起拍/你自己/你的照片及对应英文短语）改写为等价说法，并追加“主角不是机器人/AI 助手本人，禁止使用 AI 自身形象作为身份来源”的显式声明。
+- **`debug_logging` 真正生效**：开启后在日志输出 identity 归一化结果、解析到的 QQ 号、头像 URL 与工具选择细节（含被跳过的 selfie 工具），便于排查“画错人”类问题。
+
+### 变更
+
+- `avatar_draw` 工具描述强化了 `identity` 传参规则：“看看我”必须传 `sender`，不要省略。
+
+### 移除
+
+- 移除仓库中的 `tests/` 测试目录及本地测试缓存（`.pytest_cache/`、`.ruff_cache/`）。测试不影响插件运行时行为，移除后插件功能不变；代码风格检查（ruff，见 `pyproject.toml`）保留。
+
 ## [v0.2.0] - 2026-09-01
 
 本版本新增管理员专属的会话上下文清理能力，解决上下文过长导致回复变慢的问题。
@@ -55,5 +75,6 @@
 - 用户可视化配置面板（`_conf_schema.json`）。
 - 单元测试（无需 AstrBot 运行环境即可执行）。
 
+[v0.2.1]: https://github.com/linlin269/astrbot_plugin_auto_tool_all/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/linlin269/astrbot_plugin_auto_tool_all/compare/8a8f4e2...v0.2.0
 [v0.1.0]: https://github.com/linlin269/astrbot_plugin_auto_tool_all/commit/8a8f4e2

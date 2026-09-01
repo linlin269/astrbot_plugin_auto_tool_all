@@ -4,3 +4,4 @@ __pycache__/
 .coverage
 .venv/
 .env
+.ruff_cache/

@@ -65,7 +65,17 @@ pip install -r requirements.txt
 
 请在 selfie_image 的 Web 管理面板中开启 `image_enable_llm_tool`。本插件不调用 selfie_image 的 `/画` 或 `/看看你` 指令，而是调用其 `generate_image` 工具，因此不会与现有 command 冲突。
 
-selfie_image 会从当前事件读取消息图片、引用图片、@头像和本地参考图。本插件把机器人 QQ 头像下载到插件数据目录后，以本地 `Image` 组件临时注入事件，避免被 selfie_image 的“过滤机器人 qlogo URL”逻辑排除。
+selfie_image 会从当前事件读取消息图片、引用图片、@头像和本地参考图。本插件把 QQ 头像下载到插件数据目录后，以本地 `Image` 组件临时注入事件，避免被 selfie_image 的“过滤机器人 qlogo URL”逻辑排除。
+
+### 身份与“画谁都是机器人”的防护
+
+selfie_image 的 `generate_image` 内部会把带“自拍/合影/同框/和我/形象照”等关键词的请求改道到它的 AI 自拍流程，并以机器人形象图作为身份锚点——这会让“看看我”也画出机器人。本插件做了三层防护：
+
+- **身份识别报错不兜底**：`identity` 传了无法识别的值时直接返回错误说明（列出合法取值），让模型带正确参数重试，而不是静默画成机器人；“我/我自己/myself”等口语别名都能正确解析为发送者。
+- **自拍工具自动跳过**：画“我/TA”等非机器人身份时，`generate_selfie` 这类只能画机器人自己的工具会从候选列表中剔除；若首选工具不可用，会明确告知原因而不是悄悄回退到自拍工具。
+- **触发词改写 + 身份声明**：为非机器人身份合成提示词时，把 selfie 触发词改写为等价说法（如“自拍”→“个人生活照”），并显式声明“主角不是机器人本人，忽略内置 AI 自身形象参考图”。
+
+排查方法：开启 `debug_logging` 后，日志会输出每次实际使用的 identity、解析到的 QQ 号与注入的参考图路径；机器人回复中的“已使用 XX 的 QQ 头像调用 …”也会如实反映当次解析结果。
 
 ## 自然语言示例
 
@@ -96,7 +106,8 @@ selfie_image 会从当前事件读取消息图片、引用图片、@头像和本
 主要配置项：
 
 - `image_tool_name`：默认 `generate_image`。
-- `image_tool_candidates`：首选工具不可用时的回退列表。
+- `image_tool_candidates`：首选工具不可用时的回退列表（画非机器人身份时其中的 `generate_selfie` 会被自动跳过）。
+- `debug_logging`：输出身份解析、头像下载与工具选择细节，排查“画错人”问题时开启。
 - `allowed_tool_names` / `blocked_tool_names`：限制万能工具入口可调用的工具。
 - `avatar_spec`、`avatar_cache_ttl_minutes`：QQ头像规格和缓存时间。
 - `max_reference_images`、`external_image_max_mb`：参考图数量和下载大小上限。
@@ -109,13 +120,3 @@ selfie_image 会从当前事件读取消息图片、引用图片、@头像和本
 - 停用工具、黑名单工具和 schema 不允许的参数会被拒绝或过滤。
 - 图片缓存存放于 `data/plugin_data/astrbot_plugin_auto_tool_all/`，不会写入插件目录。
 - 目标环境仍应通过 AstrBot 的工具权限配置限制高风险工具；本插件不会绕过工具权限。
-
-## 测试
-
-当前工作区没有 AstrBot 本体，集成测试需要在实际 AstrBot 源码/运行环境执行。静态测试可运行：
-
-```text
-python -m compileall astrbot_plugin_auto_tool_all
-pytest -q astrbot_plugin_auto_tool_all/tests
-ruff check astrbot_plugin_auto_tool_all
-```

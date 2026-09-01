@@ -9,7 +9,7 @@
     "description": "生图工具回退列表",
     "type": "list",
     "default": ["generate_image", "generate_selfie"],
-    "hint": "首选工具不存在或停用时按顺序尝试。工具必须已通过 llm_tool/FunctionTool/MCP 注册。"
+    "hint": "首选工具不存在或停用时按顺序尝试。画“我/TA”等非机器人身份时，其中的 generate_selfie 会被自动跳过（它只能画机器人自己的形象）。"
   },
   "avatar_spec": {
     "description": "QQ头像尺寸",
@@ -69,6 +69,7 @@
   "debug_logging": {
     "description": "启用调试日志",
     "type": "bool",
-    "default": false
+    "default": false,
+    "hint": "开启后输出 avatar_draw 的身份解析结果、QQ 号、头像 URL 与工具选择细节，便于排查“画错人”问题。"
   }
 }
