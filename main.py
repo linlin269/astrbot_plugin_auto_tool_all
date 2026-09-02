@@ -985,6 +985,11 @@ class AutoToolAll(Star):
         url 和 key 支持四种给法：写在同一句、回复引用、上一条消息、
         分多条消息先后发送（内存记忆 30 分钟）。命中即拦截事件，
         直接调 HTTP 接口，测试结果按总回复时间升序汇总推送。
+
+        stop_event 必须等全部消息 yield 完再调用：AstrBot v4.25+ 的
+        stop_event 是永久停止（_force_stopped，set_result 不会重置），
+        若在 yield 前调用，调度器会在首个 yield 后终止本生成器，
+        后续消息（含“开始测试”之后的测速结果）全部丢失。
         """
         try:
             prepared = self._prepare_probe(event)
@@ -995,48 +1000,52 @@ class AutoToolAll(Star):
             return
 
         mode, url, key, prefix, missing = prepared
-        event.stop_event()
-        if missing:
-            yield event.plain_result(missing)
-            return
-
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
         try:
-            models = await self.probe.list_models(url, key, prefix)
-        except ProbeError as exc:
-            yield event.plain_result(f"获取模型列表失败：{exc}")
-            return
-        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
-            logger.exception("openai probe list_models failed")
-            yield event.plain_result(f"获取模型列表时发生异常：{exc}")
-            return
+            if missing:
+                yield event.plain_result(missing)
+                return
 
-        if mode == "list":
-            lines = [f"该接口共有 {len(models)} 个模型："]
-            lines.extend(f"{i}. {name}" for i, name in enumerate(models, 1))
-            for chunk in _chunk_lines(lines):
-                yield event.plain_result(chunk)
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            try:
+                models = await self.probe.list_models(url, key, prefix)
+            except ProbeError as exc:
+                yield event.plain_result(f"获取模型列表失败：{exc}")
+                return
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                logger.exception("openai probe list_models failed")
+                yield event.plain_result(f"获取模型列表时发生异常：{exc}")
+                return
+
+            if mode == "list":
+                lines = [f"该接口共有 {len(models)} 个模型："]
+                lines.extend(f"{i}. {name}" for i, name in enumerate(models, 1))
+                for chunk in _chunk_lines(lines):
+                    yield event.plain_result(chunk)
+                self._forget_probe_key(umo)
+                return
+
+            concurrency = self.probe.concurrency()
+            timeout = self.probe.timeout_seconds()
+            if len(models) >= _TEST_ACK_THRESHOLD:
+                yield event.plain_result(
+                    f"开始测试，共 {len(models)} 个模型"
+                    f"（{concurrency} 个并发，每个 {timeout} 秒超时），测完自动汇报。"
+                )
+            # 用完即弃：url/key 已在本地变量里，进入测速前先丢弃记忆中的
+            # key，测速中途异常也不会把 key 留在内存里。
             self._forget_probe_key(umo)
-            return
-
-        concurrency = self.probe.concurrency()
-        timeout = self.probe.timeout_seconds()
-        if len(models) >= _TEST_ACK_THRESHOLD:
-            yield event.plain_result(
-                f"开始测试，共 {len(models)} 个模型"
-                f"（{concurrency} 个并发，每个 {timeout} 秒超时），测完自动汇报。"
-            )
-        try:
-            probe_result = await self.probe.probe_models(
-                url, key, models, api_prefix=prefix
-            )
-        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
-            logger.exception("openai probe_models failed")
-            yield event.plain_result(f"测试过程发生异常：{exc}")
-            return
-        for chunk in _chunk_lines(probe_result.summary().splitlines()):
-            yield event.plain_result(chunk)
-        self._forget_probe_key(umo)
+            try:
+                probe_result = await self.probe.probe_models(
+                    url, key, models, api_prefix=prefix
+                )
+            except Exception as exc:
+                logger.exception("openai probe_models failed")
+                yield event.plain_result(f"测试过程发生异常：{exc}")
+                return
+            for chunk in _chunk_lines(probe_result.summary().splitlines()):
+                yield event.plain_result(chunk)
+        finally:
+            event.stop_event()
 
     def _prepare_probe(
         self, event: AstrMessageEvent
@@ -1115,7 +1124,7 @@ class AutoToolAll(Star):
         return value
 
     def _forget_probe_key(self, umo: str) -> None:
-        """用完即弃：一次成功的列表/测试之后立刻丢弃 key。"""
+        """用完即弃：模型列表拉取成功后立刻丢弃 key，后续步骤只用本地变量。"""
         entry = self._probe_memory.get(umo)
         if not entry:
             return

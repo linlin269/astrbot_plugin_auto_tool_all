@@ -5,6 +5,19 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.3.1] - 2026-09-03
+
+本版本修复模型测速在 AstrBot v4.25+ 上只发“开始测试”预告、测速结果不回发的问题，并加固测速的异常处理与 key 丢弃时机。不涉及任何新增功能或配置项。
+
+### 修复
+
+- **批量测速不回消息（AstrBot v4.25+）**：`openai_probe_listener` 原先在监听器开头调用 `event.stop_event()`。v4.25 起 `stop_event()` 设置永久停止标志（`_force_stopped`，后续 `set_result` 不会重置），调度器在首个 yield 后即终止生成器：模型数达到预告阈值（6 个）时只发“开始测试”预告，`probe_models` 不再执行，测速结果全部丢失；模型列表超长时也只发第一段。现改为全部消息 yield 完成后在 `finally` 中调用 `event.stop_event()`，预告与所有结果分片都能正常送达，并保持命中后拦截后续监听器与默认 LLM 回复的原有行为；v4.25 之前的 AstrBot 同样兼容。
+
+### 变更
+
+- **测速异常不再沉默**：`probe_models` 的异常捕获从 `(AttributeError, RuntimeError, TypeError, ValueError)` 放宽为 `Exception`，非预期异常（如网络库错误）现在也会回复“测试过程发生异常”并记录日志，而不是无任何反馈；`CancelledError` 不属于 `Exception`，仍会正常传播。
+- **key 用完即弃更彻底**：测速路径把 `_forget_probe_key` 前移到 `probe_models` 之前——模型列表拉取成功后立即丢弃内存中的 key（后续步骤只用本地变量），测速中途异常也不会把 key 留到记忆 TTL 过期。
+
 ## [v0.3.0] - 2026-09-03
 
 本版本把 `astrbot_plugin_anysearch` 的核心联网检索能力内置到插件中，默认可使用 AnySearch 访客模式；同时对无凭据的百度、Google、关键词搜图和以图搜图进行了匿名可行性验证，只发布实际稳定的能力。
