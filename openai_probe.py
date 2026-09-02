@@ -118,11 +118,13 @@ _MEDIA_EXT_RE = re.compile(
 _QLOGO_RE = re.compile(r"qlogo\.cn|headimg_dl", re.IGNORECASE)
 
 _KEY_LABELED_RE = re.compile(
-    r"(?:apikey|api_key|key|密钥|口令|令牌|token)\s*[:：=]\s*[\"']?"
+    r"(?:apikey|api_key|key|密钥|口令|令牌|token)\s*(?:[:：=]|是|为)\s*[\"']?"
     r"([A-Za-z0-9._~+/=\-]{12,})",
     re.IGNORECASE,
 )
-_SK_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}")
+# Use an ASCII identifier boundary so Chinese text can touch the key prefix.
+_SK_RE = re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{6,}")
+_EMBEDDED_SK_RE = re.compile(r"[A-Za-z0-9_]sk-", re.IGNORECASE)
 _BEARER_RE = re.compile(r"\bBearer\s+([A-Za-z0-9._\-]{12,})")
 _BARE_TOKEN_RE = re.compile(r"[A-Za-z0-9._~\-]{16,}")
 
@@ -159,7 +161,7 @@ def extract_api_key(text: str) -> str:
     bearer = _BEARER_RE.findall(value)
     if bearer:
         return bearer[-1]
-    if _BARE_TOKEN_RE.fullmatch(value):
+    if _BARE_TOKEN_RE.fullmatch(value) and not _EMBEDDED_SK_RE.search(value):
         return value
     return ""
 
