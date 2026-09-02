@@ -29,6 +29,11 @@ class ToolBridge:
             "call_plugin_tool",
             "fetch_media",
             "avatar_draw",
+            "anysearch_search",
+            "anysearch_batch_search",
+            "anysearch_extract",
+            "anysearch_site_search",
+            "web_search",
         }
     )
 

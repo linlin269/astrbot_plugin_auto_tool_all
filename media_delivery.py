@@ -25,7 +25,7 @@ _DOWNLOAD_CHUNK = 64 * 1024
 # 3 的倍数分块，保证分块 base64 编码不对齐出错；最后一块单独收尾。
 _ENCODE_CHUNK = 3 * 1024 * 1024
 _MAX_REDIRECTS = 4
-_USER_AGENT = "AstrBot-auto-tool-all/0.2"
+_USER_AGENT = "AstrBot-auto-tool-all/0.3"
 _TEMP_MAX_AGE_SECONDS = 30 * 60
 
 # 已下载待发送的媒体条目：(url, kind, base64)。

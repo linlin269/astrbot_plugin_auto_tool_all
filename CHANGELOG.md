@@ -5,7 +5,43 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.3.0] - 2026-09-03
+
+本版本把 `astrbot_plugin_anysearch` 的核心联网检索能力内置到插件中，默认可使用 AnySearch 访客模式；同时对无凭据的百度、Google、关键词搜图和以图搜图进行了匿名可行性验证，只发布实际稳定的能力。
+
+### 新增
+
+- **内置 AnySearch JSON-RPC 客户端**：直接调用 `https://api.anysearch.com/mcp`，API Key 留空时使用访客模式；不再依赖另行安装 `astrbot_plugin_anysearch`。
+- **联网搜索工具**：新增 `anysearch_search`、`anysearch_batch_search`、`anysearch_extract`、`anysearch_site_search` 和统一入口 `web_search`，支持普通搜索、1～5 条批量搜索、公开网页 Markdown 正文提取及 `domain` / `sub_domain` 站点/垂直搜索。
+- **兼容命令入口**：新增 `/anysearch`，别名 `/搜索`、`/websearch`；支持普通搜索、`extract` 和 `batch` 子命令。
+- **OneBot 长结果分段**：直接命令结果可按 `search_command_chunk_size` 分段；私聊默认开启、群聊默认关闭，规避 NapCat 私聊合并转发 `retcode=1200`。
+- **搜索配置**：新增搜索总开关、endpoint、可选 API Key、超时、结果数、批量数和命令分段配置。
+- **第三方许可**：新增 `THIRD_PARTY_NOTICES.md`，保留 `astrbot_plugin_anysearch` 的 MIT 许可与原作者版权声明。
+
+### 变更
+
+- 本插件自己的搜索工具加入内部工具名单，`call_plugin_tool` 不会递归调用这些工具；主 Agent 可直接选择它们。
+- 搜索和网页正文统一标注为不可信外部资料；单次结果、批量查询数、响应字节数和返回字符数均有硬限制。
+- README 更新为 v0.3.0 实际能力、访客额度、数据发送边界和发布流程；tag 示例改为当前版本/通用版本形式。
+
+### 安全
+
+- `anysearch_extract` 在提交给第三方服务前拒绝非 http/https、本地、回环、私网、链路本地、组播和保留地址。
+- 搜索服务 HTTP 错误不回显响应正文，避免错误页面中的凭据或敏感内容进入聊天；API Key 不写日志。
+- 配置中的 AnySearch API Key 由 AstrBot 配置系统保存；README 不再将其误描述为只存在内存。搜索关键词、站点参数和待提取 URL 会发送给 AnySearch，不应包含敏感数据。
+
+### 未纳入
+
+- **百度普通搜索 / 百度图片**：匿名访问连续触发安全验证，无法作为无凭据稳定 provider。
+- **Google 普通搜索 / Google Images**：当前网络返回需要 JavaScript 的结果壳，普通异步 HTTP 客户端无法稳定解析；无 API Key 时不承诺支持。
+- **Bing Images 关键词搜图**：完整结果页会在短时间内降级为简化/拦截页，匿名返回不稳定，未注册正式工具。
+- **以图搜图**：Google Lens、Bing Visual Search、Yandex Images、TinEye 的访客上传方式涉及登录、凭据、动态验证或图片隐私，当前版本全部不启用。
+- AnySearch 服务端当前不提供 `list_domains` 工具（实测返回 `tool not found`），因此不暴露无效的站点列表工具；站点搜索保留显式 `domain` / `sub_domain` 参数。
+
+[v0.3.0]: https://github.com/linlin269/astrbot_plugin_auto_tool_all/compare/v0.2.5...v0.3.0
+
 ## [v0.2.5] - 2026-09-02
+
 
 本版本扩展 OpenAI 兼容接口的 key 识别方式，方便直接使用中文自然表达提交探测凭据。
 

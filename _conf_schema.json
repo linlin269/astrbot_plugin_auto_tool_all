@@ -1,4 +1,58 @@
 {
+  "search_enabled": {
+    "description": "启用内置 AnySearch 搜索",
+    "type": "bool",
+    "default": true,
+    "hint": "提供普通搜索、批量搜索、公开网页正文提取和 AnySearch 站点/垂直搜索；关闭后这些工具与 /搜索 命令均不可用。"
+  },
+  "search_anysearch_endpoint": {
+    "description": "AnySearch 服务地址",
+    "type": "string",
+    "default": "https://api.anysearch.com/mcp",
+    "hint": "默认使用 AnySearch 官方 MCP JSON-RPC 地址；只填写可信的 HTTPS endpoint。"
+  },
+  "search_anysearch_api_key": {
+    "description": "AnySearch API Key（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用访客额度；填写后由 AstrBot 配置系统保存，并在请求时用于 Bearer 认证，插件不会把它写入日志。搜索关键词和网页 URL 会发送到该服务。"
+  },
+  "search_timeout_seconds": {
+    "description": "搜索请求超时（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "AnySearch 请求会限制在 5-120 秒；过短可能导致正常网页搜索超时。"
+  },
+  "search_max_results": {
+    "description": "单次搜索最大结果数",
+    "type": "int",
+    "default": 5,
+    "hint": "内置工具默认按 5 条请求，运行时限制为 1-20 条，避免上下文过大。"
+  },
+  "search_batch_max_queries": {
+    "description": "批量搜索最大查询数",
+    "type": "int",
+    "default": 5,
+    "hint": "AnySearch 批量搜索单次最多 5 条查询；超出部分会被截断。"
+  },
+  "search_command_chunk_size": {
+    "description": "搜索命令长结果分段长度",
+    "type": "int",
+    "default": 1200,
+    "hint": "仅影响 /anysearch、/搜索、/websearch 的直接命令结果；建议 300-1400，填 0 关闭分段。"
+  },
+  "search_chunk_private_results": {
+    "description": "私聊搜索结果自动分段",
+    "type": "bool",
+    "default": true,
+    "hint": "仅对 aiocqhttp/OneBot v11 私聊生效，用于规避 NapCat 私聊合并转发 retcode=1200。"
+  },
+  "search_chunk_group_results": {
+    "description": "群聊搜索结果自动分段",
+    "type": "bool",
+    "default": false,
+    "hint": "仅对 aiocqhttp/OneBot v11 群聊生效；默认关闭以避免长搜索结果拆成多条刷屏。"
+  },
   "image_tool_name": {
     "description": "头像生图默认工具名",
     "type": "string",
